@@ -3,6 +3,7 @@ import struct
 import colour
 import scipy
 import importlib.resources
+from functools import lru_cache
 from opt_einsum import contract
 import scipy.interpolate
 import scipy.special
@@ -14,6 +15,8 @@ from spektrafilm.model.illuminants import standard_illuminant
 
 _SQRT2PI = float(np.sqrt(2.0 * np.pi))
 _HANATOS2025_MAX_CORRECTION_STOPS = 2.0  # matches max_correction_stops used during the fit
+ARCTIC2026BETA02_MIDGRAY = 0.184
+ARCTIC2026BETA02_SCENE_ILLUMINANT = "D65"
 
 ################################################################################
 # LUT generatation of irradiance spectra for any xy chromaticity
@@ -403,6 +406,200 @@ def rgb_to_raw_hanatos2025(rgb, sensitivity,
     raw *= b[...,None] # scale the raw back with the scale factor
     # note that sensitivities are already normalized in balancing such that raw_midgray is 1, so no need to normalize here
     return raw
+
+
+def compute_hanatos2026_tc_lut(sensitivity, hanatos2025_adaptation, gamut_compress=None):
+    """Compute Hanatos 2026's sensitivity-integrated LUT.
+
+    Hanatos 2026 applies the film's UV/IR adaptation window to the reconstructed
+    irradiance spectra and normalizes each channel against the reference-
+    illuminant-weighted sensitivity. Unlike Hanatos 2025, it does not apply the
+    fitted exposure surface or spectral Gaussian blur.
+    """
+    sensitivity = np.asarray(sensitivity, dtype=np.float64)
+    spectra_lut = HANATOS2025_SPECTRA_LUT
+    raw_sensitivity = sensitivity
+
+    window_params = hanatos2025_adaptation.window_params
+    if (
+        hanatos2025_adaptation.apply_window
+        and window_params is not None
+        and np.asarray(window_params).size == 4
+    ):
+        window_params = np.asarray(window_params, dtype=np.float64)
+        if window_params[1] > 0.0 and window_params[3] > 0.0:
+            window = eval_erf4_spectral_bandpass(window_params)
+            if sensitivity.shape[1] == 1:
+                window = window[:, :1]
+            illuminant = standard_illuminant(
+                hanatos2025_adaptation.reference_illuminant
+            )
+            denominator = np.sum(sensitivity * illuminant[:, None], axis=0)
+            numerator = np.sum(
+                sensitivity * illuminant[:, None] * window, axis=0
+            )
+            normalization = np.maximum(
+                numerator / np.maximum(denominator, 1e-10),
+                1e-10,
+            )
+            raw_sensitivity = sensitivity * window / normalization[None, :]
+
+    raw_lut = contract("ijl,lm->ijm", spectra_lut, raw_sensitivity)
+
+    if gamut_compress is not None and gamut_compress.active:
+        from spektrafilm.utils.gamut_compression import remap_tc_lut_for_compression
+
+        reference_xy = _illuminant_to_xy(
+            hanatos2025_adaptation.reference_illuminant
+        )
+        raw_lut = remap_tc_lut_for_compression(
+            raw_lut, reference_xy, gamut_compress
+        )
+    return raw_lut
+
+
+def rgb_to_raw_hanatos2026(
+    rgb,
+    sensitivity,
+    color_space,
+    apply_cctf_decoding,
+    reference_illuminant,
+    tc_lut=None,
+):
+    tc_raw, brightness = _rgb_to_tc_b(
+        rgb,
+        color_space=color_space,
+        apply_cctf_decoding=apply_cctf_decoding,
+        reference_illuminant=reference_illuminant,
+    )
+    if tc_lut is None:
+        tc_lut = compute_hanatos2026_tc_lut(
+            sensitivity,
+            Hanatos2025SensitivityAdaptation(
+                apply_window=False,
+                apply_surface=False,
+                reference_illuminant=reference_illuminant,
+            ),
+        )
+    raw = apply_lut_cubic_2d(tc_lut, tc_raw)
+    raw *= brightness[..., None]
+    return raw
+
+
+@lru_cache(maxsize=1)
+def load_arctic2026beta02_spectra_lut():
+    """Load Arctic 2026 beta02's D65-recovered reflectance LUT."""
+    resource = (
+        importlib.resources.files("spektrafilm.data.luts.spectral_upsampling")
+        .joinpath("arctic2026beta02", "reflectance_xy_tc.npy")
+    )
+    with resource.open("rb") as file:
+        spectra_lut = np.asarray(np.load(file, allow_pickle=False), dtype=np.float64)
+    expected_shape = (192, 192, len(SPECTRAL_SHAPE.wavelengths))
+    if spectra_lut.shape != expected_shape:
+        raise ValueError(
+            f"Arctic 2026 beta02 LUT must have shape {expected_shape}, "
+            f"got {spectra_lut.shape}"
+        )
+    if not np.all(np.isfinite(spectra_lut)):
+        raise ValueError("Arctic 2026 beta02 LUT contains non-finite values")
+    return spectra_lut
+
+
+def compute_arctic2026beta02_tc_lut(
+    sensitivity,
+    reference_illuminant,
+    *,
+    neutral_sensitivity=None,
+    gamut_compress=None,
+    spectra_lut=None,
+):
+    """Build the film-raw LUT from Arctic beta02 reflectance spectra.
+
+    The reflectance table is projected under D65, but is relit by the film's
+    reference illuminant before integration. Each channel is white-balanced
+    against the unfiltered film sensitivity, then anchored so 18.4% D65 gray
+    maps to unit raw exposure.
+    """
+    if spectra_lut is None:
+        spectra_lut = load_arctic2026beta02_spectra_lut()
+    spectra_lut = np.asarray(spectra_lut, dtype=np.float64)
+    sensitivity = np.asarray(sensitivity, dtype=np.float64)
+    if sensitivity.ndim != 2:
+        raise ValueError("film sensitivity must be a wavelength-by-channel array")
+    if spectra_lut.ndim != 3 or spectra_lut.shape[-1] != sensitivity.shape[0]:
+        raise ValueError(
+            "Arctic 2026 beta02 spectra and film sensitivity wavelength "
+            "dimensions must match"
+        )
+    if neutral_sensitivity is None:
+        neutral_sensitivity = sensitivity
+    neutral_sensitivity = np.asarray(neutral_sensitivity, dtype=np.float64)
+    if neutral_sensitivity.shape != sensitivity.shape:
+        raise ValueError(
+            "neutral_sensitivity must have the same shape as sensitivity"
+        )
+
+    illuminant = standard_illuminant(reference_illuminant)
+    if illuminant.shape != (sensitivity.shape[0],):
+        raise ValueError(
+            "reference illuminant and film sensitivity wavelength dimensions "
+            "must match"
+        )
+    relit_spectra = spectra_lut * illuminant[None, None, :]
+    raw_lut = contract("ijl,lm->ijm", relit_spectra, sensitivity)
+
+    scene_xy = _illuminant_to_xy(ARCTIC2026BETA02_SCENE_ILLUMINANT)
+    neutral_tc, midgray_brightness = _rgb_to_tc_b(
+        np.full((1, 1, 3), ARCTIC2026BETA02_MIDGRAY, dtype=np.float64),
+        color_space="sRGB",
+        apply_cctf_decoding=False,
+        reference_illuminant=ARCTIC2026BETA02_SCENE_ILLUMINANT,
+    )
+    neutral_spectrum = apply_lut_cubic_2d(spectra_lut, neutral_tc)[0, 0]
+    raw_neutral = contract(
+        "l,lm->m", neutral_spectrum * illuminant, neutral_sensitivity
+    )
+    if not np.all(np.isfinite(raw_neutral)) or np.any(raw_neutral <= 0):
+        raise ValueError(
+            "Arctic 2026 beta02 produced a non-positive or non-finite neutral "
+            "film exposure"
+        )
+    if not np.all(np.isfinite(midgray_brightness)) or np.any(midgray_brightness <= 0):
+        raise ValueError("Arctic 2026 beta02 midgray brightness is invalid")
+
+    raw_lut /= raw_neutral[None, None, :] * midgray_brightness[..., None]
+
+    if gamut_compress is not None and gamut_compress.active:
+        from spektrafilm.utils.gamut_compression import remap_tc_lut_for_compression
+
+        raw_lut = remap_tc_lut_for_compression(raw_lut, scene_xy, gamut_compress)
+    return raw_lut
+
+
+def rgb_to_raw_arctic2026beta02(
+    rgb,
+    sensitivity,
+    color_space,
+    apply_cctf_decoding,
+    reference_illuminant,
+    tc_lut=None,
+):
+    """Convert RGB to film raw using the D65-projected Arctic beta02 LUT."""
+    if tc_lut is None:
+        tc_lut = compute_arctic2026beta02_tc_lut(
+            sensitivity, reference_illuminant
+        )
+    tc_raw, brightness = _rgb_to_tc_b(
+        rgb,
+        color_space=color_space,
+        apply_cctf_decoding=apply_cctf_decoding,
+        reference_illuminant=ARCTIC2026BETA02_SCENE_ILLUMINANT,
+    )
+    raw = apply_lut_cubic_2d(tc_lut, tc_raw)
+    raw *= brightness[..., None]
+    return raw
+
 
 def rgb_to_smooth_spectrum(rgb, color_space, apply_cctf_decoding, reference_illuminant):
     # direct interpolation of the spectra lut, to be used only for smooth spectra close to white

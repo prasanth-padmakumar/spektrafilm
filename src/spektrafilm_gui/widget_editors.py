@@ -289,6 +289,11 @@ class EnumEditor(QtWidgets.QComboBox):
         index = self.findText(value)
         if index >= 0:
             self.setCurrentIndex(index)
+        elif self.count() and value == "hanatos2026":
+            # Older saved GUI state may contain the experimental method,
+            # which is not available on the current runtime branch. Treat it
+            # as the current default instead of blocking UI startup.
+            self.setCurrentIndex(0)
         else:
             raise ValueError(f"{value!r} is not a valid option")
 

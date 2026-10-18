@@ -56,8 +56,11 @@ def _apply_camera(params: RuntimePhotoParams, state: GuiState) -> None:
 def _apply_io(params: RuntimePhotoParams, state: GuiState) -> None:
     params.io = replace(state.input_image.io)
     params.io.output_color_space = state.simulation.io.output_color_space
+    params.io.auto_levels = state.simulation.io.auto_levels
     params.io.output_cctf_encoding = True
     params.io.scan_film = state.simulation.io.scan_film
+    params.io.normalize_black_white = state.simulation.io.normalize_black_white
+    params.io.project_positive_as_slide = state.simulation.io.project_positive_as_slide
     params.io.input_gamut_compress = replace(state.input_gamut_compress)
     params.io.output_gamut_compress = replace(state.output_gamut_compress)
 

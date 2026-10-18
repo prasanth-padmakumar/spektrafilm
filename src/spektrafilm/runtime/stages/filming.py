@@ -6,7 +6,12 @@ from spektrafilm.model.color_filters import color_filter_transmittance
 from spektrafilm.model.diffusion import apply_diffusion_filter_um, apply_gaussian_blur_um, apply_halation_um, boost_highlights
 from spektrafilm.model.develop import compute_density_spectral, develop, develop_simple
 from spektrafilm.utils.autoexposure import measure_raw_autoexposure_ev
-from spektrafilm.utils.spectral_upsampling import rgb_to_raw_hanatos2025, rgb_to_raw_mallett2019
+from spektrafilm.utils.spectral_upsampling import (
+    rgb_to_raw_arctic2026beta02,
+    rgb_to_raw_hanatos2026,
+    rgb_to_raw_hanatos2025,
+    rgb_to_raw_mallett2019,
+)
 
 
 class FilmingStage:
@@ -21,7 +26,7 @@ class FilmingStage:
         self._resize_service = resize_service
         self._enlarger_service = enlarger_service
         
-        # send info for hanatos2025 sensitivity adaptation to LUT service
+        # Pass profile adaptation parameters to the spectral LUT service.
         hanatos2025_adaptation = self._film.hanatos2025_adaptation()
         hanatos2025_adaptation.apply_window = self._settings.apply_hanatos2025_adaptation_window
         hanatos2025_adaptation.apply_surface = self._settings.apply_hanatos2025_adaptation_surface
@@ -111,8 +116,8 @@ class FilmingStage:
         color_space: str = "sRGB",
         apply_cctf_decoding: bool = False,
     ) -> np.ndarray:
-        sensitivity = 10 ** self._film.data.log_sensitivity
-        sensitivity = np.nan_to_num(sensitivity)
+        sensitivity = np.nan_to_num(10 ** self._film.data.log_sensitivity)
+        neutral_sensitivity = sensitivity
 
         # A camera taking filter (UV / haze / colored) sits in front of the lens
         # and multiplies the incoming light spectrum; fold its transmittance into
@@ -122,9 +127,33 @@ class FilmingStage:
         if transmittance is not None:
             sensitivity = sensitivity * transmittance[:, None]
 
-        if self._settings.rgb_to_raw_method == "hanatos2025":
+        if self._settings.rgb_to_raw_method in ("hanatos2025", "hanatos2026"):
             tc_lut = self._lut_service.get_filming_tc_lut(sensitivity)
             raw = rgb_to_raw_hanatos2025(
+                rgb,
+                sensitivity,
+                color_space=color_space,
+                apply_cctf_decoding=apply_cctf_decoding,
+                reference_illuminant=self._film.info.reference_illuminant,
+                tc_lut=tc_lut,
+            )
+        elif self._settings.rgb_to_raw_method == "hanatos2026":
+            tc_lut = self._lut_service.get_hanatos2026_tc_lut(sensitivity)
+            raw = rgb_to_raw_hanatos2026(
+                rgb,
+                sensitivity,
+                color_space=color_space,
+                apply_cctf_decoding=apply_cctf_decoding,
+                reference_illuminant=self._film.info.reference_illuminant,
+                tc_lut=tc_lut,
+            )
+        elif self._settings.rgb_to_raw_method == "arctic2026beta02":
+            tc_lut = self._lut_service.get_arctic2026beta02_tc_lut(
+                sensitivity,
+                self._film.info.reference_illuminant,
+                neutral_sensitivity=neutral_sensitivity,
+            )
+            raw = rgb_to_raw_arctic2026beta02(
                 rgb,
                 sensitivity,
                 color_space=color_space,
@@ -182,4 +211,3 @@ class FilmingStage:
             density_cmy,
             base_density=self._film.data.base_density,
         )
-    

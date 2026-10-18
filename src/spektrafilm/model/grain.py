@@ -127,6 +127,21 @@ def layer_particle_model(density,
     probability_of_development = np.clip(probability_of_development, 1e-6, 1 - 1e-6)  # for safe calc
     od_particle = density_max / n_particles_per_pixel
 
+    # At very coarse rasters, one pixel can cover enough film area to contain
+    # billions of grains. The compound Poisson-Binomial model converges to a
+    # normal density distribution in that limit, while integer count samplers
+    # can overflow or reject the rate. Sample its analytic mean and variance.
+    minimum_saturation = 1.0 - (1.0 - 1e-6) * grain_uniformity
+    maximum_poisson_rate = n_particles_per_pixel / minimum_saturation
+    if maximum_poisson_rate >= 1e8:
+        variance = density * (density_max - grain_uniformity * density) / n_particles_per_pixel
+        noise = np.random.standard_normal(density.shape).astype(density.dtype, copy=False)
+        noise *= np.sqrt(np.maximum(variance, 0.0))
+        grain = np.maximum(density + noise, 0.0)
+        if blur_particle > 0:
+            grain = fast_gaussian_filter(grain, blur_particle * np.sqrt(od_particle))
+        return grain
+
     if use_fast_stats:
         binom_rvs = fast_binomial
         poisson_rvs = fast_poisson

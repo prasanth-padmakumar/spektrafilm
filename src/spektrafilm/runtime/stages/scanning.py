@@ -3,6 +3,7 @@ from __future__ import annotations
 import colour
 import numpy as np
 from opt_einsum import contract
+from colour.appearance import InductionFactors_CIECAM02
 
 from spektrafilm.config import STANDARD_OBSERVER_CMFS
 from spektrafilm.model.diffusion import apply_gaussian_blur, apply_unsharp_mask, match_channels
@@ -11,6 +12,40 @@ from spektrafilm.model.glare import add_glare
 from spektrafilm.model.illuminants import standard_illuminant
 from spektrafilm.utils.conversions import density_to_light
 from spektrafilm.utils.gamut_compression import compress_rgb
+from spektrafilm.utils.auto_levels import apply_auto_levels
+
+
+_PROJECTOR_SURROUND = InductionFactors_CIECAM02(F=0.8, c=0.525, N_c=0.8)
+_DISPLAY_SURROUND = colour.VIEWING_CONDITIONS_CIECAM02["Average"]
+_PROJECTOR_ADAPTING_LUMINANCE = 15.0
+_PROJECTOR_BACKGROUND_Y = 2.0
+_DISPLAY_ADAPTING_LUMINANCE = 64.0
+_DISPLAY_BACKGROUND_Y = 20.0
+
+
+def _adapt_projected_slide_xyz_to_display(
+    xyz: np.ndarray,
+    white_xyz: np.ndarray,
+) -> np.ndarray:
+    """Adapt projected-slide appearance in a dark surround to display viewing.
+
+    The fixed CAM16-UCS conditions are representative, not a calibrated
+    projector model.
+    """
+    appearance = colour.XYZ_to_CAM16UCS(
+        xyz,
+        XYZ_w=white_xyz,
+        L_A=_PROJECTOR_ADAPTING_LUMINANCE,
+        Y_b=_PROJECTOR_BACKGROUND_Y,
+        surround=_PROJECTOR_SURROUND,
+    )
+    return np.asarray(colour.CAM16UCS_to_XYZ(
+        appearance,
+        XYZ_w=white_xyz,
+        L_A=_DISPLAY_ADAPTING_LUMINANCE,
+        Y_b=_DISPLAY_BACKGROUND_Y,
+        surround=_DISPLAY_SURROUND,
+    ))
 
 
 class ScanningStage:
@@ -46,7 +81,9 @@ class ScanningStage:
     def scan(self, density_channels: np.ndarray) -> np.ndarray:
         rgb = self._density_to_rgb(density_channels, use_lut=self._settings.use_scanner_lut)
         rgb = self._apply_blur_and_unsharp(rgb)
-        return self._apply_cctf_encoding(rgb)
+        rgb = self._apply_cctf_encoding(rgb)
+        rgb = apply_auto_levels(rgb, self._io.auto_levels)
+        return rgb
 
     # private methods
 
@@ -76,6 +113,12 @@ class ScanningStage:
         illuminant_xyz = contract("k,kl->l", scan_illuminant, STANDARD_OBSERVER_CMFS[:]) / normalization
         illuminant_xy = colour.XYZ_to_xy(illuminant_xyz)
         xyz = add_glare(xyz, illuminant_xyz, glare)
+        if (
+            self._io.project_positive_as_slide
+            and self._io.scan_film
+            and self._film.info.type == "positive"
+        ):
+            xyz = _adapt_projected_slide_xyz_to_display(xyz, illuminant_xyz)
         rgb = colour.XYZ_to_RGB(
             xyz,
             colourspace=self._io.output_color_space,
@@ -138,6 +181,3 @@ class ScanningStage:
                 apply_cctf_encoding=True,
             )
         return rgb
-
-
-

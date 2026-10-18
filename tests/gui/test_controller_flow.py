@@ -404,10 +404,12 @@ def test_apply_profile_defaults_routes_through_selection_digest(monkeypatch) -> 
     )
     controller._next_runtime_digest_applies_stock_specifics = False
     gui_state = make_test_controller_gui_state()
+    gui_state.simulation.workflow.saving_color_space = 'Adobe RGB (1998)'
     captured: dict[str, object] = {}
     built_params = SimpleNamespace(film=None, print=None)
     digested_params = object()
-    synced_state = object()
+    synced_state = make_test_controller_gui_state()
+    synced_state.simulation.workflow.saving_color_space = 'sRGB'
 
     def fake_build_params_from_state(state):
         captured['build_state'] = state
@@ -432,6 +434,7 @@ def test_apply_profile_defaults_routes_through_selection_digest(monkeypatch) -> 
     assert captured['digested_input'] is built_params
     assert captured['synced_args'] == (digested_params, gui_state.selection.film_stock, gui_state.selection.print_paper)
     assert captured['applied_state'] is synced_state
+    assert synced_state.simulation.workflow == gui_state.simulation.workflow
     assert controller._next_runtime_digest_applies_stock_specifics is True
 
 

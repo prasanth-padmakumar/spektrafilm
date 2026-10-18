@@ -20,6 +20,7 @@ class ColorReferenceService:
         self._scan_film = io_params.scan_film
         self._output_color_space = io_params.output_color_space
         self._output_cctf_encoding = io_params.output_cctf_encoding
+        self._normalize_black_white = io_params.normalize_black_white
 
         self._black_correction = black_correction
         self._white_correction = white_correction
@@ -39,15 +40,15 @@ class ColorReferenceService:
     # public methods
 
     def _update_cmy_black_white_references(self, in_print=False):
-        if not self._black_correction and not self._white_correction:
+        if not self._black_correction and not self._white_correction and not self._normalize_black_white:
             return
-        elif self._scan_film and self._film.info.type == 'negative':
+        elif self._scan_film and self._film.info.type == 'negative' and not self._normalize_black_white:
             return
         else:
             if self.cmy_to_log_xyz is None:
                 raise RuntimeError("cmy_to_log_xyz must be configured before black/white correction is used.")
             cmy_to_log_xyz: Callable[[np.ndarray], np.ndarray] = self.cmy_to_log_xyz
-            if self._scan_film and self._film.info.type == 'positive' and not in_print:
+            if self._scan_film and not in_print:
                 cmy_black = np.nanmax(self._film.data.density_curves, axis=0)[None, None, :]
                 cmy_white = np.zeros_like(cmy_black)
                 log_xyz_black = cmy_to_log_xyz.__call__(cmy_black)
@@ -67,6 +68,13 @@ class ColorReferenceService:
                     self._print.data.density_curves,
                     gamma_factor=1.0,
                 )
+                log_xyz_black = cmy_to_log_xyz.__call__(cmy_black)
+                log_xyz_white = cmy_to_log_xyz.__call__(cmy_white)
+                self._y_black = (10 ** log_xyz_black)[:, :, 1]
+                self._y_white = (10 ** log_xyz_white)[:, :, 1]
+            elif not self._scan_film and self._normalize_black_white and in_print:
+                cmy_black = np.nanmax(self._print.data.density_curves, axis=0)[None, None, :]
+                cmy_white = np.zeros_like(cmy_black)
                 log_xyz_black = cmy_to_log_xyz.__call__(cmy_black)
                 log_xyz_white = cmy_to_log_xyz.__call__(cmy_white)
                 self._y_black = (10 ** log_xyz_black)[:, :, 1]
@@ -118,11 +126,13 @@ class ColorReferenceService:
         based on the black and white reference densities
         cmy_to_log_xyz() must be defined in the scanning stage and passed to convert cmy densities
         """
-        if not self._black_correction and not self._white_correction:
+        if not self._black_correction and not self._white_correction and not self._normalize_black_white:
             return xyz
-        if self._scan_film and self._film.info.type == 'negative':
+        if self._scan_film and self._film.info.type == 'negative' and not self._normalize_black_white:
             return xyz # do not correct negative film scans
         else:
+            if self._normalize_black_white:
+                self._update_cmy_black_white_references(in_print=not self._scan_film)
             correction_func, _ = self._correction_fucntion()
             y = xyz[:, :, 1]
             y_corrected = correction_func(y)
@@ -136,11 +146,14 @@ class ColorReferenceService:
         m = 1.0
         q = 0.0
         correction_func = lambda y: y
-        if self._black_correction and not self._white_correction:
+        if self._normalize_black_white:
+            black_level = 0.0
+            white_level = 1.0
+        elif self._black_correction and not self._white_correction:
             white_level = self._y_white
-        if self._white_correction and not self._black_correction:
+        if not self._normalize_black_white and self._white_correction and not self._black_correction:
             black_level = self._y_black
-        if self._black_correction or self._white_correction:                           
+        if self._normalize_black_white or self._black_correction or self._white_correction:
             m = (white_level - black_level) / (self._y_white - self._y_black + 1e-10)
             q = black_level - m * self._y_black
             def clipped_linear_correction(y):

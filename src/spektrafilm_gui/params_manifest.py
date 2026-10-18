@@ -36,6 +36,7 @@ from spektrafilm.utils.gamut_compression import InputGamutCompressSpec, OutputGa
 from spektrafilm.utils.morph_curves import FilmChemistryParams, PrintChemistryParams
 from spektrafilm_gui.options import (
     AutoExposureMethods,
+    AutoLevelsModes,
     DiffusionFilterFamilies,
     InputGamutCompressAlgorithms,
     NapariInterpolationModes,
@@ -710,14 +711,22 @@ CAMERA_PANEL_FIELDS = (
         tier="basic",
         min=8.0,
         max=120.0,
-        step=1.0,
-        decimals=0,
-        tooltip="Long edge of the film format in millimeters, e.g. 8, 16, 35, 60, 120.",
+        step=0.1,
+        decimals=1,
+        tooltip=(
+            "Long edge of the film format in millimeters, e.g. 8, 16, 35, 60, 120. "
+            "Sets film-plane pixel size for grain and optical diffusion; raster "
+            "resolution and output scaling determine how many pixels cover that size."
+        ),
     ),
     ParamSpec(
         f"{_CAM}.auto_exposure_method",
         enum=AutoExposureMethods,
-        tooltip="Metering method used by the virtual camera's auto-exposure.",
+        tooltip=(
+            "Metering method used by the virtual camera's auto-exposure. "
+            "Hybrid blends multi-zone exposure (65%) with highlight-weighted "
+            "exposure (35%) in stops."
+        ),
     ),
     ParamSpec(
         f"{_CAM}.color_filter",
@@ -872,24 +881,24 @@ SPECTRAL_PANEL_FIELDS = (
         "settings.rgb_to_raw_method",
         label="Spectral upsampling",
         enum=RGBtoRAWMethod,
-        tooltip="Method to upsample the spectral resolution of the image, hanatos2025 works on the full visible locus, mallett2019 works only on sRGB (will clip input).",
+        tooltip="RGB-to-film spectral method: hanatos2026 applies a normalized UV/IR sensitivity window; Arctic 2026 beta02 uses D65-recovered reflectance; hanatos2025 also supports an exposure surface; mallett2019 is a fast approximation.",
     ),
     ParamSpec(
         "settings.apply_hanatos2025_adaptation_window",
-        label="hanatos2025 adaptation window",
-        tooltip="Apply the hanatos2025 bandpass adaptation window when reconstructing spectra.",
+        label="Hanatos adaptation window",
+        tooltip="Apply the profile UV/IR bandpass window for Hanatos 2025/2026 spectral upsampling.",
     ),
     ParamSpec(
         "settings.apply_hanatos2025_adaptation_surface",
-        label="hanatos2025 adaptation surface",
-        tooltip="Apply the hanatos2025 surface adaptation polynomial when reconstructing spectra.",
+        label="Hanatos 2025 adaptation surface",
+        tooltip="Apply Hanatos 2025's fitted exposure-surface correction. Hanatos 2026 does not use an exposure surface.",
     ),
     ParamSpec(
         "settings.spectral_gaussian_blur",
         label="Spectral gaussian blur",
         min=0,
         step=0.1,
-        tooltip="Sigma in nm for Gaussian blur applied to reconstructed spectra.",
+        tooltip="Sigma in nm for Gaussian blur applied to Hanatos 2025 reconstructed spectra; not used by Hanatos 2026.",
     ),
 )
 
@@ -1006,6 +1015,25 @@ SIMULATION_ENLARGER_PANEL_FIELDS = (
 
 SIMULATION_OUTPUT_PANEL_FIELDS = (
     ParamSpec("io.output_color_space", label="Output color space", tooltip="Output color space of the simulation", enum=RGBColorSpaces),
+    ParamSpec(
+        "io.auto_levels",
+        label="Auto Levels",
+        tooltip=(
+            "Automatically set contrast using 0.5% shadow/highlight clipping. "
+            "Per Channel Contrast also snaps detected neutral midtones."
+        ),
+        enum=AutoLevelsModes,
+    ),
+    ParamSpec("io.normalize_black_white", label="Normalize W/B", tooltip="Map the modeled black and white endpoints to 0 and 1 in the display output."),
+    ParamSpec(
+        "io.project_positive_as_slide",
+        label="Projector view (positive scan)",
+        tooltip=(
+            "Adapt direct positive-film scans from representative dark-room "
+            "projection viewing to display viewing. This is an approximate "
+            "appearance transform, not a calibrated projector simulation."
+        ),
+    ),
     ParamSpec("workflow.saving_color_space", label="Saving color space", tooltip="Color space of the saved image file", enum=RGBColorSpaces),
     ParamSpec("workflow.saving_cctf_encoding", label="Saving CCTF encoding", tooltip="Add or not the CCTF to the saved image file"),
 )

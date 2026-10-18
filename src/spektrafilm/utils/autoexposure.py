@@ -2,6 +2,10 @@ import numpy as np
 import colour
 
 
+_HYBRID_SPATIAL_EV_WEIGHT = 0.65
+_HYBRID_HIGHLIGHT_EV_WEIGHT = 0.35
+
+
 def _luminance_y(image, color_space, apply_cctf_decoding):
     image_XYZ = colour.RGB_to_XYZ(image, color_space, apply_cctf_decoding=apply_cctf_decoding)
     return image_XYZ[:, :, 1]
@@ -47,6 +51,11 @@ def _metered_value(field, method):
         # from center so corner zones contribute less.
         h, w = field.shape
         n_rows, n_cols = 5, 5
+        if h < n_rows or w < n_cols:
+            # A smaller field cannot provide one sample for every meter zone.
+            # Use its full-frame mean instead of producing empty zones.
+            return float(np.mean(field))
+
         cell_h = h // n_rows
         cell_w = w // n_cols
         zone_means = []
@@ -107,11 +116,31 @@ def _exposure_compensation_ev(metered_value, target):
     return exposure_compensation_ev
 
 
+def _metered_exposure_ev(field, method, target):
+    """Return the exposure recommendation, blending spatial and highlight
+    readings in EV for the hybrid mode."""
+    if method != 'hybrid':
+        return _exposure_compensation_ev(_metered_value(field, method), target)
+
+    spatial_ev = _exposure_compensation_ev(
+        _metered_value(field, 'multi_zone'),
+        target,
+    )
+    highlight_ev = _exposure_compensation_ev(
+        _metered_value(field, 'highlight_weighted'),
+        target,
+    )
+    return (
+        _HYBRID_SPATIAL_EV_WEIGHT * spatial_ev
+        + _HYBRID_HIGHLIGHT_EV_WEIGHT * highlight_ev
+    )
+
+
 def measure_autoexposure_ev(image, color_space='sRGB', apply_cctf_decoding=True, method='center_weighted'):
     """Meter a display-RGB image and return the EV that brings the metered
     region to midgray (0.184 linear luminance)."""
     image_Y = _luminance_y(image, color_space, apply_cctf_decoding)
-    return _exposure_compensation_ev(_metered_value(image_Y, method), target=0.184)
+    return _metered_exposure_ev(image_Y, method, target=0.184)
 
 
 def measure_raw_autoexposure_ev(raw, method='center_weighted', target=1.0):
@@ -120,7 +149,7 @@ def measure_raw_autoexposure_ev(raw, method='center_weighted', target=1.0):
     default target of 1 places midgray at its reference exposure. The metering
     field is the mean across the raw channels."""
     field = np.mean(raw, axis=2)
-    return _exposure_compensation_ev(_metered_value(field, method), target=target)
+    return _metered_exposure_ev(field, method, target)
 
 
 if __name__ == '__main__':

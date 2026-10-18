@@ -154,7 +154,19 @@ def normalize_simulation_dict(data: dict[str, Any]) -> dict[str, Any]:
         },
         'io': {
             'output_color_space': data.get('output_color_space', PROJECT_DEFAULT_GUI_STATE.simulation.io.output_color_space),
+            'auto_levels': data.get(
+                'auto_levels',
+                PROJECT_DEFAULT_GUI_STATE.simulation.io.auto_levels,
+            ),
             'scan_film': data.get('scan_film', PROJECT_DEFAULT_GUI_STATE.simulation.io.scan_film),
+            'normalize_black_white': data.get(
+                'normalize_black_white',
+                PROJECT_DEFAULT_GUI_STATE.simulation.io.normalize_black_white,
+            ),
+            'project_positive_as_slide': data.get(
+                'project_positive_as_slide',
+                PROJECT_DEFAULT_GUI_STATE.simulation.io.project_positive_as_slide,
+            ),
         },
         'workflow': {
             'saving_color_space': data.get('saving_color_space', PROJECT_DEFAULT_GUI_STATE.simulation.workflow.saving_color_space),
@@ -330,7 +342,10 @@ def gui_state_from_params(
             io=IOParams(
                 output_color_space=params.io.output_color_space,
                 output_cctf_encoding=params.io.output_cctf_encoding,
+                auto_levels=params.io.auto_levels,
                 scan_film=params.io.scan_film,
+                normalize_black_white=params.io.normalize_black_white,
+                project_positive_as_slide=params.io.project_positive_as_slide,
             ),
             workflow=SimulationWorkflowState(
                 saving_color_space="sRGB",

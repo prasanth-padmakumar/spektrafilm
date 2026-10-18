@@ -55,6 +55,39 @@ spektrafilm_lut_creator ─┘
 - If you find yourself adding a string-keyed lookup table here, stop and ask whether the lookup belongs in `spektrafilm_lut_creator` or in the GUI.
 - The pipeline's behavior on a synthetic gray ramp is the regression baseline. Math changes should be deliberate; bit-for-bit drift matters and is caught by `tests/test_regression_baselines.py`.
 
+## RGB-to-film spectral upsampling
+
+`settings.rgb_to_raw_method` selects how input RGB is reconstructed before
+film exposure. `hanatos2025` uses the irradiance LUT, `mallett2019` is a
+matrix-based approximation, and `arctic2026beta02` uses the Arctic 2026
+beta02 reflectance LUT. Arctic recovers reflectance under D65, relights it by
+the selected film reference illuminant, and integrates it against that film's
+spectral sensitivity. Its bundled LUT is attributed and licensed in
+`data/luts/spectral_upsampling/arctic2026beta02/README.txt`.
+
+`hanatos2026` integrates Hanatos irradiance spectra against the film
+sensitivity with the profile's normalized UV/IR adaptation window. The window
+can be disabled with `settings.apply_hanatos2025_adaptation_window`; Hanatos
+2026 does not use the Hanatos 2025 exposure-surface correction or spectral
+Gaussian blur.
+
+`IOParams.normalize_black_white` is an opt-in display-output adjustment that
+linearly maps the modeled scan's black and white endpoints to 0 and 1. It is
+disabled by default; negative-film scans remain unchanged unless enabled.
+
+The virtual camera's `auto_exposure_method="hybrid"` blends the multi-zone
+meter's scene-wide reading (65%) with the highlight-weighted reading (35%) in
+exposure stops. It retains a spatially aware midtone/shadow anchor while
+allowing broad bright areas to pull exposure down. This selects one exposure;
+it is not multi-exposure HDR capture or highlight reconstruction.
+
+`IOParams.auto_levels` optionally applies automatic contrast after scanning.
+**Enhance Monochromatic Contrast** uses common shadow/highlight points for all
+channels; **Per Channel Contrast with Snap Neutral Midtones** derives points
+independently per channel and snaps detected neutral midtones to reduce color
+casts. Both modes clip 0.5% of samples at each end, approximating Levels > Auto.
+Auto Levels is off by default.
+
 ## Where to look
 
 - `runtime/topology.py` — tap dispatcher, the Node/Tap model

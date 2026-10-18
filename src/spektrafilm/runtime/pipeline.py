@@ -151,7 +151,10 @@ class SimulationPipeline:
         start = perf_counter()
         try:
             return run_topology(
-                self._topology, inject, collect, image,
+                self._topology,
+                inject,
+                collect,
+                image,
                 on_fire=self._record_node_timing,
             )
         finally:

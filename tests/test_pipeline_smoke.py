@@ -84,6 +84,46 @@ def test_uniform_gray_output_is_stable_and_artifact_free(default_params) -> None
             np.testing.assert_allclose(result_1[row, col, :], center_pixel, atol=1e-6)
 
 
+def test_pipeline_runs_with_arctic2026beta02(default_params) -> None:
+    default_params.settings.rgb_to_raw_method = "arctic2026beta02"
+    default_params.camera.auto_exposure = False
+    default_params.debug.deactivate_spatial_effects = True
+    default_params.debug.deactivate_stochastic_effects = True
+    default_params.io.input_color_space = "sRGB"
+    default_params.io.input_cctf_decoding = False
+
+    image = np.array(
+        [
+            [[0.184, 0.184, 0.184], [0.7, 0.2, 0.1]],
+            [[0.05, 0.4, 0.1], [0.1, 0.2, 0.7]],
+        ],
+        dtype=np.float64,
+    )
+    result = simulate(image, default_params)
+
+    _assert_valid_output(result, shape=image.shape)
+
+
+def test_pipeline_runs_with_hanatos2026(default_params) -> None:
+    default_params.settings.rgb_to_raw_method = "hanatos2026"
+    default_params.camera.auto_exposure = False
+    default_params.debug.deactivate_spatial_effects = True
+    default_params.debug.deactivate_stochastic_effects = True
+    default_params.io.input_color_space = "sRGB"
+    default_params.io.input_cctf_decoding = False
+
+    image = np.array(
+        [
+            [[0.184, 0.184, 0.184], [0.7, 0.2, 0.1]],
+            [[0.05, 0.4, 0.1], [0.1, 0.2, 0.7]],
+        ],
+        dtype=np.float64,
+    )
+    result = simulate(image, default_params)
+
+    _assert_valid_output(result, shape=image.shape)
+
+
 def test_exposure_controls_behave_consistently(default_params) -> None:
     gray = _tile_rgb((0.18, 0.18, 0.18), 4)
     levels = [0.02, 0.05, 0.18, 0.5, 0.90]
@@ -222,3 +262,41 @@ def test_auto_exposure_normalizes_bright_inputs(default_params) -> None:
 
     assert np.mean(auto_result) < np.mean(manual_result)
     assert 0.45 < np.mean(auto_result) < 0.51
+
+
+def test_auto_levels_enhance_monochromatic_contrast() -> None:
+    values = np.linspace(0.05, 0.8, 64, dtype=np.float64).reshape(8, 8)
+    image = np.stack((values, values, values), axis=-1)
+    params = make_fast_test_params()
+    params.io.auto_levels = "Enhance Monochromatic Contrast"
+    reference = simulate(image, params)
+    params.io.auto_levels = "Off"
+    unadjusted = simulate(image, params)
+    params.io.auto_levels = "Enhance Monochromatic Contrast"
+
+    result = simulate(image, params)
+
+    _assert_valid_output(result, shape=image.shape)
+    assert not np.allclose(result, unadjusted)
+    np.testing.assert_allclose(result, reference)
+
+
+def test_matrix_auto_exposure_matches_average_for_uniform_filtered_bw_scene() -> None:
+    image = _tile_rgb((0.184, 0.184, 0.184), 8)
+    params = make_fast_test_params(
+        film_profile="kodak_doublex",
+        print_profile="kodak_2302",
+    )
+    params.camera.color_filter = "hoya_r1"
+    params.camera.auto_exposure = True
+    params.settings.rgb_to_raw_method = "hanatos2026"
+    params.io.input_color_space = "sRGB"
+    params.io.input_cctf_decoding = False
+    params.enlarger.print_exposure_compensation = False
+
+    params.camera.auto_exposure_method = "average"
+    average_result = simulate(image, params)
+    params.camera.auto_exposure_method = "matrix"
+    matrix_result = simulate(image, params)
+
+    np.testing.assert_allclose(matrix_result, average_result, atol=1e-6)

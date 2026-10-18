@@ -104,6 +104,7 @@ def digest_params(params: RuntimePhotoParams, apply_stocks_specifics=True) -> Ru
         params.debug.deactivate_spatial_effects = True
         params.debug.deactivate_stochastic_effects = True
         params.camera.auto_exposure = False
+        params.io.auto_levels = "Off"
         params.scanner.white_correction = False
         params.scanner.black_correction = False
 

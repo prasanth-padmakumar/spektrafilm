@@ -6,7 +6,11 @@ import numpy as np
 from spektrafilm.data.profiles_loader import Hanatos2025SensitivityAdaptation
 from spektrafilm.utils.gamut_compression import InputGamutCompressSpec
 from spektrafilm.utils.lut import compute_with_lut, compute_with_lut_1d
-from spektrafilm.utils.spectral_upsampling import compute_hanatos2025_tc_lut
+from spektrafilm.utils.spectral_upsampling import (
+    compute_arctic2026beta02_tc_lut,
+    compute_hanatos2026_tc_lut,
+    compute_hanatos2025_tc_lut,
+)
 from spektrafilm.utils.timings import timeit
 
 
@@ -30,6 +34,15 @@ class SpectralLUTService:
         self._film_sensitivity = None # to track if tc_lut needs to be recomputed when film sensitivity changes
         self._cached_filming_adaptation = None # full adaptation state for which the cached tc_lut was computed
         self._cached_input_gamut_compress: InputGamutCompressSpec | None = None
+        self.hanatos2026_tc_lut_memory: np.ndarray | None = None
+        self._hanatos2026_sensitivity: np.ndarray | None = None
+        self._cached_hanatos2026_adaptation: Hanatos2025SensitivityAdaptation | None = None
+        self._cached_hanatos2026_input_gamut_compress: InputGamutCompressSpec | None = None
+        self.arctic2026beta02_tc_lut_memory: np.ndarray | None = None
+        self._arctic_sensitivity: np.ndarray | None = None
+        self._arctic_neutral_sensitivity: np.ndarray | None = None
+        self._arctic_reference_illuminant: str | None = None
+        self._arctic_input_gamut_compress: InputGamutCompressSpec | None = None
         self._enlarger_test_results_memory = None # to test if enlarger LUTs are identical for same input
         self._scanner_test_results_memory = None # to test if scanner LUTs are identical for same input
         
@@ -67,6 +80,15 @@ class SpectralLUTService:
             self._film_sensitivity = None
             self._cached_filming_adaptation = None
             self._cached_input_gamut_compress = None
+            self.hanatos2026_tc_lut_memory = None
+            self._hanatos2026_sensitivity = None
+            self._cached_hanatos2026_adaptation = None
+            self._cached_hanatos2026_input_gamut_compress = None
+            self.arctic2026beta02_tc_lut_memory = None
+            self._arctic_sensitivity = None
+            self._arctic_neutral_sensitivity = None
+            self._arctic_reference_illuminant = None
+            self._arctic_input_gamut_compress = None
 
     @staticmethod
     def _copy_hanatos2025_adaptation(
@@ -210,3 +232,78 @@ class SpectralLUTService:
             gamut_compress=self.input_gamut_compress,
         )
         return self.filming_tc_lut_memory
+
+    @timeit("get_hanatos2026_tc_lut")
+    def get_hanatos2026_tc_lut(self, sensitivity):
+        sensitivity = np.asarray(sensitivity)
+        adaptation = self.hanatos2025_adaptation
+        if (
+            self.hanatos2026_tc_lut_memory is not None
+            and self._hanatos2026_sensitivity is not None
+            and np.array_equal(self._hanatos2026_sensitivity, sensitivity)
+            and self._same_hanatos2026_adaptation(
+                self._cached_hanatos2026_adaptation, adaptation
+            )
+            and self._cached_hanatos2026_input_gamut_compress
+            == self.input_gamut_compress
+        ):
+            return self.hanatos2026_tc_lut_memory
+
+        self.hanatos2026_tc_lut_memory = compute_hanatos2026_tc_lut(
+            sensitivity,
+            adaptation,
+            gamut_compress=self.input_gamut_compress,
+        )
+        self._hanatos2026_sensitivity = np.array(sensitivity, copy=True)
+        self._cached_hanatos2026_adaptation = self._copy_hanatos2025_adaptation(
+            adaptation
+        )
+        self._cached_hanatos2026_input_gamut_compress = self.input_gamut_compress
+        return self.hanatos2026_tc_lut_memory
+
+    @staticmethod
+    def _same_hanatos2026_adaptation(
+        left: Hanatos2025SensitivityAdaptation | None,
+        right: Hanatos2025SensitivityAdaptation | None,
+    ) -> bool:
+        if left is None or right is None:
+            return left is right
+        return (
+            bool(left.apply_window) == bool(right.apply_window)
+            and left.reference_illuminant == right.reference_illuminant
+            and np.array_equal(left.window_params, right.window_params)
+        )
+
+    @timeit("get_arctic2026beta02_tc_lut")
+    def get_arctic2026beta02_tc_lut(
+        self,
+        sensitivity,
+        reference_illuminant,
+        *,
+        neutral_sensitivity=None,
+    ):
+        sensitivity = np.asarray(sensitivity)
+        if neutral_sensitivity is None:
+            neutral_sensitivity = sensitivity
+        neutral_sensitivity = np.asarray(neutral_sensitivity)
+        if (
+            self.arctic2026beta02_tc_lut_memory is not None
+            and self._arctic_sensitivity is not None
+            and np.array_equal(self._arctic_sensitivity, sensitivity)
+            and np.array_equal(self._arctic_neutral_sensitivity, neutral_sensitivity)
+            and self._arctic_reference_illuminant == reference_illuminant
+            and self._arctic_input_gamut_compress == self.input_gamut_compress
+        ):
+            return self.arctic2026beta02_tc_lut_memory
+
+        self.arctic2026beta02_tc_lut_memory = compute_arctic2026beta02_tc_lut(
+            sensitivity,
+            reference_illuminant,
+            neutral_sensitivity=neutral_sensitivity,
+            gamut_compress=self.input_gamut_compress,
+        )
+        self._arctic_sensitivity = np.array(sensitivity, copy=True)
+        self._arctic_neutral_sensitivity = np.array(neutral_sensitivity, copy=True)
+        self._arctic_reference_illuminant = reference_illuminant
+        self._arctic_input_gamut_compress = self.input_gamut_compress
+        return self.arctic2026beta02_tc_lut_memory

@@ -533,9 +533,23 @@ def test_simulation_section_profile_use_badges_follow_selected_profiles() -> Non
 
     assert isinstance(section.film_stock, widget_editors_module.ProfileEnumEditor)
     assert isinstance(section.print_paper, widget_editors_module.ProfileEnumEditor)
+    assert isinstance(section.project_positive_as_slide, widget_editors_module.BoolEditor)
+    assert section.project_positive_as_slide.value is False
     assert section.film_stock.currentText() == list(state_module.FilmStocks)[0].value
     assert section.print_paper.currentText() == list(state_module.PrintPapers)[0].value
     assert widget_editors_module.ProfileEnumEditor.display_text_for_value('kodak_portra_400') == 'still / neg / color / kodak_portra_400'
     assert widget_editors_module.ProfileEnumEditor.display_text_for_value('kodak_vision3_50d') == 'cine / neg / color / kodak_vision3_50d'
     assert widget_editors_module.ProfileEnumEditor.display_text_for_value('kodak_2393') == 'cine / neg / color / kodak_2393'
     assert widget_editors_module.ProfileEnumEditor.display_text_for_value('kodak_trix') == 'cine / pos / bw / kodak_trix'
+
+
+def test_output_section_exposes_auto_levels_modes() -> None:
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from qtpy import QtWidgets
+
+    _app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    simulation = widgets_module.SimulationSection()
+    section = widgets_module.OutputSection(simulation)
+
+    assert isinstance(simulation.auto_levels, widget_editors_module.EnumEditor)
+    assert simulation.auto_levels.value == 'Off'

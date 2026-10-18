@@ -191,6 +191,7 @@ class IOParams:
     input_cctf_decoding: bool = False
     output_color_space: str = "sRGB"
     output_cctf_encoding: bool = True
+    auto_levels: str = "Off"
     # Input gamut compression: smoothly pulls input chromaticities that
     # fall outside the visible spectral locus back inside (where Hanatos
     # 2025's spectral upsampling is well-defined). Baked into the
@@ -206,6 +207,10 @@ class IOParams:
     # is needed. See spektrafilm-research/studies/a00/a40_lut_system/n110
     # for the design and b40 for the smoothness analysis.
     output_gamut_compress: OutputGamutCompressSpec = field(default_factory=OutputGamutCompressSpec)
+    normalize_black_white: bool = False
+    # Appearance adaptation for a positive transparency viewed by projection.
+    # Applied only to direct scans of positive film, never to paper prints.
+    project_positive_as_slide: bool = False
     crop: bool = False
     crop_center: tuple[float, float] = (0.5, 0.5)
     crop_size: tuple[float, float] = (0.1, 0.1)
@@ -240,6 +245,8 @@ class TapsParams:
 @dataclass
 class SettingsParams:
     rgb_to_raw_method: str = "hanatos2025"
+    # The window setting is shared by Hanatos 2025/2026; the exposure-surface
+    # correction remains specific to Hanatos 2025.
     apply_hanatos2025_adaptation_window: bool = True
     apply_hanatos2025_adaptation_surface: bool = False
     spectral_gaussian_blur: float = 0.0

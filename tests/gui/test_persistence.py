@@ -13,6 +13,8 @@ from spektrafilm_gui.persistence import (
     save_gui_state_to_path,
 )
 from spektrafilm_gui.state import PROJECT_DEFAULT_GUI_STATE
+from spektrafilm_gui.state_bridge import apply_gui_state, collect_gui_state
+from spektrafilm_gui.widgets import create_widget_bundle
 
 from .helpers import make_test_gui_state
 
@@ -21,6 +23,7 @@ def test_gui_state_round_trip_preserves_tuple_fields() -> None:
     state = make_test_gui_state()
     state.input_image.io.crop_size = (0.25, 0.4)
     state.grain.rms_granularity = (6.0, 7.0, 12.0)
+    state.simulation.io.auto_levels = 'Per Channel Contrast with Snap Neutral Midtones'
     state.gui_only.display.gray_18_canvas = True
     state.gui_only.display.white_padding = 0.18
 
@@ -29,6 +32,7 @@ def test_gui_state_round_trip_preserves_tuple_fields() -> None:
     assert restored == state
     assert isinstance(restored.input_image.io.crop_size, tuple)
     assert isinstance(restored.grain.rms_granularity, tuple)
+    assert restored.simulation.io.auto_levels == 'Per Channel Contrast with Snap Neutral Midtones'
 
 
 def test_save_and_load_gui_state_file(tmp_path: Path) -> None:
@@ -75,6 +79,30 @@ def test_save_default_and_clear_saved_default(monkeypatch, tmp_path: Path) -> No
     clear_saved_default_gui_state()
 
     assert not default_path.exists()
+
+
+def test_save_current_gui_as_default_preserves_saving_color_space(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from qtpy import QtWidgets
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    assert app is not None
+    monkeypatch.setattr(
+        'spektrafilm_gui.persistence.default_gui_state_path',
+        lambda: tmp_path / 'gui_default_state.json',
+    )
+    widgets = create_widget_bundle()
+    apply_gui_state(PROJECT_DEFAULT_GUI_STATE, widgets=widgets)
+    widgets.simulation.saving_color_space.value = 'Adobe RGB (1998)'
+
+    current_state = collect_gui_state(widgets=widgets)
+    save_default_gui_state(current_state)
+    restored = load_default_gui_state()
+
+    assert current_state.simulation.workflow.saving_color_space == 'Adobe RGB (1998)'
+    assert restored.simulation.workflow.saving_color_space == 'Adobe RGB (1998)'
 
 
 def test_gui_state_from_dict_fills_missing_section_from_defaults() -> None:

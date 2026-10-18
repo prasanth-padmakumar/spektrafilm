@@ -164,3 +164,149 @@ def test_compute_hanatos2025_tc_lut_normalizes_window_to_preserve_midgray(monkey
     normalization = np.sum(sensitivity * illuminant[:, None] * window, axis=0) / np.sum(sensitivity * illuminant[:, None], axis=0)
     expected = np.einsum('ijl,lm->ijm', lut, sensitivity * (window / normalization))
     np.testing.assert_allclose(raw_lut, expected)
+
+
+def test_compute_hanatos2026_tc_lut_uses_normalized_window_but_not_surface_or_blur(monkeypatch):
+    lut = np.array(
+        [
+            [[1.0, 10.0], [2.0, 20.0]],
+            [[3.0, 30.0], [4.0, 40.0]],
+        ],
+        dtype=np.float64,
+    )
+    sensitivity = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+        ],
+        dtype=np.float64,
+    )
+    window = np.array(
+        [
+            [0.5, 0.25, 0.75],
+            [0.8, 0.6, 0.4],
+        ],
+        dtype=np.float64,
+    )
+    illuminant = np.array([2.0, 4.0], dtype=np.float64)
+
+    adaptation = Hanatos2025SensitivityAdaptation(
+        window_params=np.array([415.0, 12.0, 667.0, 76.0]),
+        surface_params=np.full((3, 15), 100.0),
+        spectral_gaussian_blur=3.0,
+        reference_illuminant="D55",
+        apply_window=True,
+        apply_surface=True,
+    )
+
+    monkeypatch.setattr(spectral_upsampling_module, "HANATOS2025_SPECTRA_LUT", lut)
+    monkeypatch.setattr(spectral_upsampling_module, "eval_erf4_spectral_bandpass", lambda _params: window)
+    monkeypatch.setattr(spectral_upsampling_module, "standard_illuminant", lambda _label: illuminant)
+
+    raw_lut = spectral_upsampling_module.compute_hanatos2026_tc_lut(
+        sensitivity, adaptation
+    )
+
+    normalization = np.sum(
+        sensitivity * illuminant[:, None] * window, axis=0
+    ) / np.sum(sensitivity * illuminant[:, None], axis=0)
+    expected = np.einsum(
+        "ijl,lm->ijm", lut, sensitivity * (window / normalization)
+    )
+    np.testing.assert_allclose(raw_lut, expected)
+
+    adaptation.apply_window = False
+    no_window_lut = spectral_upsampling_module.compute_hanatos2026_tc_lut(
+        sensitivity, adaptation
+    )
+    np.testing.assert_allclose(
+        no_window_lut, np.einsum("ijl,lm->ijm", lut, sensitivity)
+    )
+
+
+def test_compute_hanatos2026_tc_lut_supports_single_channel_sensitivity(monkeypatch):
+    lut = np.ones((2, 2, 2), dtype=np.float64)
+    sensitivity = np.array([[1.0], [2.0]])
+    window = np.array([[0.5, 0.5, 0.5], [1.0, 1.0, 1.0]])
+    adaptation = Hanatos2025SensitivityAdaptation(
+        window_params=np.array([420.0, 20.0, 680.0, 80.0]),
+        reference_illuminant="D55",
+        apply_window=True,
+    )
+
+    monkeypatch.setattr(spectral_upsampling_module, "HANATOS2025_SPECTRA_LUT", lut)
+    monkeypatch.setattr(spectral_upsampling_module, "eval_erf4_spectral_bandpass", lambda _params: window)
+    monkeypatch.setattr(
+        spectral_upsampling_module,
+        "standard_illuminant",
+        lambda _label: np.array([1.0, 1.0]),
+    )
+
+    result = spectral_upsampling_module.compute_hanatos2026_tc_lut(
+        sensitivity, adaptation
+    )
+
+    np.testing.assert_allclose(result, np.full((2, 2, 1), 3.0))
+
+
+def test_arctic2026beta02_neutral_midgray_maps_to_unit_raw():
+    sensitivity = np.linspace(0.5, 1.5, 81)[:, None] * np.array([[1.0, 0.8, 1.2]])
+    spectra = np.ones((9, 9, 81), dtype=np.float64)
+    tc_lut = spectral_upsampling_module.compute_arctic2026beta02_tc_lut(
+        sensitivity,
+        "D55",
+        spectra_lut=spectra,
+    )
+
+    rgb = np.full((1, 1, 3), 0.184, dtype=np.float64)
+    raw = spectral_upsampling_module.rgb_to_raw_arctic2026beta02(
+        rgb,
+        sensitivity,
+        color_space="sRGB",
+        apply_cctf_decoding=False,
+        reference_illuminant="D55",
+        tc_lut=tc_lut,
+    )
+
+    np.testing.assert_allclose(raw, 1.0, atol=1e-10)
+
+
+def test_arctic2026beta02_scales_raw_linearly_with_input_brightness():
+    sensitivity = np.ones((81, 3), dtype=np.float64)
+    tc_lut = np.ones((9, 9, 3), dtype=np.float64)
+    rgb = np.full((2, 1, 3), 0.184, dtype=np.float64)
+    rgb[1] *= 2.0
+
+    raw = spectral_upsampling_module.rgb_to_raw_arctic2026beta02(
+        rgb,
+        sensitivity,
+        color_space="sRGB",
+        apply_cctf_decoding=False,
+        reference_illuminant="D55",
+        tc_lut=tc_lut,
+    )
+
+    np.testing.assert_allclose(raw[1], raw[0] * 2.0)
+
+
+def test_arctic2026beta02_loader_reads_bundled_lut():
+    lut = spectral_upsampling_module.load_arctic2026beta02_spectra_lut()
+    assert lut.shape == (192, 192, 81)
+    assert np.all(np.isfinite(lut))
+    assert np.max(lut) > 1.0
+
+    sensitivity = np.ones((81, 3), dtype=np.float64)
+    tc_lut = spectral_upsampling_module.compute_arctic2026beta02_tc_lut(
+        sensitivity,
+        "D55",
+        spectra_lut=lut,
+    )
+    gray = spectral_upsampling_module.rgb_to_raw_arctic2026beta02(
+        np.full((1, 1, 3), 0.184, dtype=np.float64),
+        sensitivity,
+        color_space="sRGB",
+        apply_cctf_decoding=False,
+        reference_illuminant="D55",
+        tc_lut=tc_lut,
+    )
+    np.testing.assert_allclose(gray, 1.0, atol=1e-8)

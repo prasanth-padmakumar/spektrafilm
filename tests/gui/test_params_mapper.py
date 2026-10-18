@@ -62,6 +62,15 @@ def test_build_params_copies_scanner_group() -> None:
     assert params.scanner is not state.scanner
 
 
+def test_build_params_maps_simulation_black_white_normalization() -> None:
+    state = make_state()
+    state.simulation.io.normalize_black_white = True
+
+    params = build_params_from_state(state)
+
+    assert params.io.normalize_black_white is True
+
+
 def test_build_params_copies_halation_group() -> None:
     # state.halation is the runtime HalationParams group, in runtime units
     # (0-1 fractions, surfaced verbatim in the GUI). The mapper copies it
@@ -109,7 +118,7 @@ def test_build_params_maps_runtime_strings() -> None:
     state = make_state()
     state.camera.auto_exposure_method = 'median'
     state.input_image.io.input_color_space = 'Display P3'
-    state.input_image.settings.rgb_to_raw_method = 'mallett2019'
+    state.input_image.settings.rgb_to_raw_method = 'hanatos2026'
     state.simulation.io.output_color_space = 'ACES2065-1'
     state.simulation.workflow.saving_cctf_encoding = False
     state.gui_only.display.settings.preview_max_size = 1024
@@ -118,10 +127,28 @@ def test_build_params_maps_runtime_strings() -> None:
 
     assert params.camera.auto_exposure_method == 'median'
     assert params.io.input_color_space == 'Display P3'
-    assert params.settings.rgb_to_raw_method == 'mallett2019'
+    assert params.settings.rgb_to_raw_method == 'hanatos2026'
     assert params.settings.preview_max_size == 1024
     assert params.io.output_color_space == 'ACES2065-1'
     assert params.io.output_cctf_encoding is True
+
+
+def test_build_params_maps_hybrid_auto_exposure_method() -> None:
+    state = make_state()
+    state.camera.auto_exposure_method = 'hybrid'
+
+    params = build_params_from_state(state)
+
+    assert params.camera.auto_exposure_method == 'hybrid'
+
+
+def test_build_params_maps_auto_levels_mode() -> None:
+    state = make_state()
+    state.simulation.io.auto_levels = 'Per Channel Contrast with Snap Neutral Midtones'
+
+    params = build_params_from_state(state)
+
+    assert params.io.auto_levels == 'Per Channel Contrast with Snap Neutral Midtones'
 
 
 def test_build_params_maps_enlarger_diffusion_filter() -> None:

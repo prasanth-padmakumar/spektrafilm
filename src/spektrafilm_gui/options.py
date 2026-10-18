@@ -14,7 +14,9 @@ class RGBColorSpaces(Enum):
 
 
 class RGBtoRAWMethod(Enum):
+    hanatos2026 = "hanatos2026"
     hanatos2025 = "hanatos2025"
+    arctic2026beta02 = "arctic2026beta02"
     mallett2019 = "mallett2019"
 
 
@@ -31,8 +33,15 @@ class AutoExposureMethods(Enum):
     multi_zone = "multi_zone"
     partial = "partial"
     highlight_weighted = "highlight_weighted"
+    hybrid = "hybrid"
     median = "median"
     average = "average"
+
+
+class AutoLevelsModes(Enum):
+    off = "Off"
+    monochromatic_contrast = "Enhance Monochromatic Contrast"
+    per_channel_contrast = "Per Channel Contrast with Snap Neutral Midtones"
 
 
 class NapariInterpolationModes(Enum):
@@ -64,5 +73,3 @@ class OutputGamutCompressAlgorithms(Enum):
     oklrab = "oklrab"
     jzazbz = "jzazbz"
     cam16ucs = "cam16ucs"
-
-

@@ -33,6 +33,17 @@ and paper profiles, adjust the simulation interactively, and move quickly
 between fast(-ish) previews and more detailed final scans. Full resolution
 export is very slow at the moment.
 
+When **Scan Film** is enabled for a positive stock, **Projector view
+(positive scan)** optionally adapts the slide's appearance from a representative
+dark projection surround to display viewing conditions. It is a fixed CAM16
+appearance approximation, not a calibrated projector or screen-luminance
+simulation; it does not affect negative-film scans or print output.
+
+The Spectral controls include **Hanatos 2026**, which applies a normalized
+profile-specific UV/IR adaptation window, and **Arctic 2026 beta02**, an
+experimental reflectance-based RGB-to-film method that recovers under D65 and
+relights for the selected film stock.
+
 > [!IMPORTANT]
 >   spektrafilm (all lower caps) is open for research, integration, and production use. The project is in rapid development, some ares are still being build and will change fast.
 >
@@ -438,5 +449,3 @@ spektrafilm is developed in my free time, often during late nights after my rese
 
 Sample images are from
 [signatureedits.com](https://www.signatureedits.com/)/free-raw-photos.
-
-

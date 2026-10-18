@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -293,6 +294,7 @@ class GuiController:
             film_stock=state.selection.film_stock,
             print_paper=state.selection.print_paper,
         )
+        synced_state.simulation.workflow = replace(state.simulation.workflow)
         self._apply_profile_sync_state(synced_state)
         # Populate the dropdowns last: with no prior selection the editor
         # defaults to the family's floor-middle development (None when no family).
