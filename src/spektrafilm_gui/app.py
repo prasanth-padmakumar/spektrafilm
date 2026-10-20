@@ -264,6 +264,16 @@ def connect_controller_signals(controller: GuiController, widgets: WidgetBundle)
     widgets.display.output_interpolation.currentTextChanged.connect(controller.set_output_interpolation_mode)
     widgets.display.update_preview_requested.connect(controller.refresh_preview_cache)
     widgets.display.update_preview_requested.connect(controller.request_auto_preview)
+
+    # Spectral method changes directly affect preview colour. Refresh this
+    # preview immediately, even if general auto-preview is disabled.
+    spectral_editor = getattr(getattr(widgets, 'input_image', None), '_editors', {}).get(
+        'rgb_to_raw_method'
+    )
+    if spectral_editor is not None:
+        signal = getattr(spectral_editor, 'currentTextChanged', None)
+        if signal is not None:
+            signal.connect(lambda _value: controller.run_preview())
     connect_auto_preview_signals(controller, widgets)
 
 

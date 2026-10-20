@@ -505,6 +505,17 @@ def load_arctic2026beta02_spectra_lut():
         raise ValueError("Arctic 2026 beta02 LUT contains non-finite values")
     return spectra_lut
 
+@lru_cache(maxsize=1)
+def load_arctic2026beta04_spectra_lut():
+    resource = (importlib.resources.files("spektrafilm.data.luts.spectral_upsampling")
+                .joinpath("arctic2026beta04", "reflectance_xy_tc.npy"))
+    with resource.open("rb") as file:
+        spectra_lut = np.asarray(np.load(file, allow_pickle=False), dtype=np.float64)
+    expected_shape = (192, 192, len(SPECTRAL_SHAPE.wavelengths))
+    if spectra_lut.shape != expected_shape:
+        raise ValueError(f"Arctic 2026 beta04 LUT must have shape {expected_shape}, got {spectra_lut.shape}")
+    return spectra_lut
+
 
 def compute_arctic2026beta02_tc_lut(
     sensitivity,
@@ -599,6 +610,18 @@ def rgb_to_raw_arctic2026beta02(
     raw = apply_lut_cubic_2d(tc_lut, tc_raw)
     raw *= brightness[..., None]
     return raw
+
+def rgb_to_raw_arctic2026beta04(rgb, sensitivity, color_space,
+                                apply_cctf_decoding, reference_illuminant,
+                                tc_lut=None):
+    if tc_lut is None:
+        tc_lut = compute_arctic2026beta02_tc_lut(
+            sensitivity, reference_illuminant,
+            spectra_lut=load_arctic2026beta04_spectra_lut())
+    tc_raw, brightness = _rgb_to_tc_b(
+        rgb, color_space=color_space, apply_cctf_decoding=apply_cctf_decoding,
+        reference_illuminant=ARCTIC2026BETA02_SCENE_ILLUMINANT)
+    return apply_lut_cubic_2d(tc_lut, tc_raw) * brightness[..., None]
 
 
 def rgb_to_smooth_spectrum(rgb, color_space, apply_cctf_decoding, reference_illuminant):

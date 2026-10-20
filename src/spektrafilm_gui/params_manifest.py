@@ -42,7 +42,9 @@ from spektrafilm_gui.options import (
     NapariInterpolationModes,
     OutputGamutCompressAlgorithms,
     RGBColorSpaces,
+    ExportEngines,
     RGBtoRAWMethod,
+    GrainModels,
 )
 
 
@@ -344,6 +346,11 @@ GRAIN_MANIFEST = GroupManifest(
     # below, which mirror the GrainParams schema categories.
     fields=(
         ParamSpec(f"{_G}.active", tier="basic", tooltip="Add grain to the negative"),
+        ParamSpec(f"{_G}.model", tier="basic", enum=GrainModels, label="Grain model", tooltip="Layered dye particles, RMS granularity, or high-quality Boolean Monte Carlo grain."),
+        ParamSpec(f"{_G}.synthesis_samples", min=4, max=128, step=1, label="MC aperture samples", tooltip="Higher values reduce Monte Carlo grain noise; slower."),
+        ParamSpec(f"{_G}.synthesis_mean_radius_um", min=0.15, max=2.0, step=0.05, label="MC mean radius (µm)"),
+        ParamSpec(f"{_G}.synthesis_radius_stddev_ratio", min=0.05, max=1.0, step=0.05, label="MC radius variation"),
+        ParamSpec(f"{_G}.synthesis_amount", min=0, max=1, step=0.05, label="MC amount"),
         # --- pixel statistics ---
         ParamSpec(
             f"{_G}.rms_granularity",
@@ -881,7 +888,7 @@ SPECTRAL_PANEL_FIELDS = (
         "settings.rgb_to_raw_method",
         label="Spectral upsampling",
         enum=RGBtoRAWMethod,
-        tooltip="RGB-to-film spectral method: hanatos2026 applies a normalized UV/IR sensitivity window; Arctic 2026 beta02 uses D65-recovered reflectance; hanatos2025 also supports an exposure surface; mallett2019 is a fast approximation.",
+        tooltip="RGB-to-film spectral method: Hanatos 2025/2026, Arctic 2026 beta02/beta04 reflectance, or Mallett 2019.",
     ),
     ParamSpec(
         "settings.apply_hanatos2025_adaptation_window",
@@ -921,6 +928,11 @@ SPECIAL_PANEL_FIELDS = (
         min=0,
         max=2,
         step=1,
+    ),
+    ParamSpec(
+        "deterministic_parity",
+        label="Deterministic parity mode",
+        tooltip="Disable stochastic effects for pixel-for-pixel Python/Rust comparisons.",
     ),
 )
 
@@ -1034,6 +1046,7 @@ SIMULATION_OUTPUT_PANEL_FIELDS = (
             "appearance transform, not a calibrated projector simulation."
         ),
     ),
+    ParamSpec("workflow.export_engine", label="Export engine", tooltip="Use Python for the current export path or Rust f64 for faster final rendering", enum=ExportEngines),
     ParamSpec("workflow.saving_color_space", label="Saving color space", tooltip="Color space of the saved image file", enum=RGBColorSpaces),
     ParamSpec("workflow.saving_cctf_encoding", label="Saving CCTF encoding", tooltip="Add or not the CCTF to the saved image file"),
 )

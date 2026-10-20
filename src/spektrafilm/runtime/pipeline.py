@@ -136,7 +136,8 @@ class SimulationPipeline:
 
         self._topology: list[Node] = self._build_topology()
 
-    def process(self, image, *, inject: str | None = None, collect: str | None = None):
+    def process(self, image, *, inject: str | None = None, collect: str | None = None,
+                on_tap=None):
         """Run the pipeline.
 
         Defaults run end-to-end (``rgb_in`` → ``rgb_out``). Pass
@@ -151,11 +152,12 @@ class SimulationPipeline:
         start = perf_counter()
         try:
             return run_topology(
-                self._topology,
+                self._topology if on_tap is None else self._build_topology(on_tap),
                 inject,
                 collect,
                 image,
                 on_fire=self._record_node_timing,
+                on_tap=on_tap,
             )
         finally:
             self._last_elapsed_time = perf_counter() - start
@@ -212,11 +214,14 @@ class SimulationPipeline:
 
     # private methods
 
-    def _build_topology(self) -> list[Node]:
+    def _build_topology(self, on_film_raw=None) -> list[Node]:
         f, p, s = self._filming_stage, self._printing_stage, self._scanning_stage
+        film_expose = f.expose
+        if on_film_raw is not None:
+            film_expose = lambda image: f.expose(image, on_raw=on_film_raw)
         common = [
             Node((Tap.RGB_IN,),     (Tap.RGB_PRE,),    self._preprocess, "preprocess"),
-            Node((Tap.RGB_PRE,),    (Tap.LOG_E_FILM,), f.expose,         "filming.expose"),
+            Node((Tap.RGB_PRE,),    (Tap.LOG_E_FILM,), film_expose,      "filming.expose"),
             Node((Tap.LOG_E_FILM,), (Tap.CMY_FILM,),   f.develop,        "filming.develop"),
         ]
         if self.io.scan_film:

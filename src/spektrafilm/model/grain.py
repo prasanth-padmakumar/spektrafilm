@@ -1,4 +1,5 @@
 import numpy as np
+from spektrafilm.model.grain_synthesis import apply_grain_synthesis
 import scipy
 import scipy.ndimage
 from spektrafilm.model.density_curves import interp_density_cmy_layers_channel
@@ -362,6 +363,12 @@ def apply_grain(
 ):
     if not grain.active or bypass_grain:
         return density_cmy
+
+    if getattr(grain, "model", "layered") in ("monte_carlo", "synthesis"):
+        density_max = np.nanmax(np.asarray(density_curves, dtype=np.float64), axis=0)
+        return apply_grain_synthesis(
+            density_cmy, pixel_size_um, grain, density_curves
+        ).astype(density_cmy.dtype, copy=False)
 
     # Streaming multilayer grain: build and grain one channel's sub-layer stack
     # at a time, so the full (H, W, sublayers, channels) array is never held —

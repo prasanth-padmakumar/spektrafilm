@@ -8,6 +8,8 @@ from spektrafilm.utils.gamut_compression import InputGamutCompressSpec
 from spektrafilm.utils.lut import compute_with_lut, compute_with_lut_1d
 from spektrafilm.utils.spectral_upsampling import (
     compute_arctic2026beta02_tc_lut,
+    load_arctic2026beta04_spectra_lut,
+    load_arctic2026beta04_spectra_lut,
     compute_hanatos2026_tc_lut,
     compute_hanatos2025_tc_lut,
 )
@@ -307,3 +309,21 @@ class SpectralLUTService:
         self._arctic_reference_illuminant = reference_illuminant
         self._arctic_input_gamut_compress = self.input_gamut_compress
         return self.arctic2026beta02_tc_lut_memory
+
+    @timeit("get_arctic2026beta04_tc_lut")
+    def get_arctic2026beta04_tc_lut(self, sensitivity, reference_illuminant, *, neutral_sensitivity=None):
+        return compute_arctic2026beta02_tc_lut(
+            sensitivity, reference_illuminant,
+            neutral_sensitivity=neutral_sensitivity,
+            gamut_compress=self.input_gamut_compress,
+            spectra_lut=load_arctic2026beta04_spectra_lut(),
+        )
+
+    @timeit("get_arctic2026beta04_tc_lut")
+    def get_arctic2026beta04_tc_lut(self, sensitivity, reference_illuminant, *, neutral_sensitivity=None):
+        return compute_arctic2026beta02_tc_lut(
+            sensitivity, reference_illuminant,
+            neutral_sensitivity=neutral_sensitivity,
+            gamut_compress=self.input_gamut_compress,
+            spectra_lut=load_arctic2026beta04_spectra_lut(),
+        )

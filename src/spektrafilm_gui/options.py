@@ -17,7 +17,18 @@ class RGBtoRAWMethod(Enum):
     hanatos2026 = "hanatos2026"
     hanatos2025 = "hanatos2025"
     arctic2026beta02 = "arctic2026beta02"
+    arctic2026beta04 = "arctic2026beta04"
     mallett2019 = "mallett2019"
+
+class GrainModels(Enum):
+    layered = "layered"
+    rms = "rms"
+    monte_carlo = "monte_carlo"
+
+
+class ExportEngines(Enum):
+    python = "python"
+    rust_f64 = "rust_f64"
 
 
 class RawWhiteBalance(Enum):

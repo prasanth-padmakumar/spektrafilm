@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
 from spektrafilm.model.color_filters import color_filter_transmittance
@@ -8,10 +10,12 @@ from spektrafilm.model.develop import compute_density_spectral, develop, develop
 from spektrafilm.utils.autoexposure import measure_raw_autoexposure_ev
 from spektrafilm.utils.spectral_upsampling import (
     rgb_to_raw_arctic2026beta02,
+    rgb_to_raw_arctic2026beta04,
     rgb_to_raw_hanatos2026,
     rgb_to_raw_hanatos2025,
     rgb_to_raw_mallett2019,
 )
+from spektrafilm.model.grain_synthesis import apply_grain_synthesis
 
 
 class FilmingStage:
@@ -41,13 +45,22 @@ class FilmingStage:
 
     # public methods
 
-    def expose(self, image: np.ndarray) -> np.ndarray:
+    def expose(
+        self,
+        image: np.ndarray,
+        *,
+        on_raw: Callable[[str, np.ndarray], None] | None = None,
+    ) -> np.ndarray:
         raw = self._rgb_to_film_raw(
             image,
             color_space=self._io.input_color_space,
             apply_cctf_decoding=self._io.input_cctf_decoding,
         )
+        if on_raw is not None:
+            on_raw("raw_before_auto_exposure", raw)
         raw = self._auto_exposure(raw)
+        if on_raw is not None:
+            on_raw("raw_after_auto_exposure", raw)
         raw *= 2 ** self._camera.exposure_compensation_ev
         boost_highlights(raw, self._film_render.halation.boost_ev,
                          self._film_render.halation.boost_range,
@@ -127,7 +140,7 @@ class FilmingStage:
         if transmittance is not None:
             sensitivity = sensitivity * transmittance[:, None]
 
-        if self._settings.rgb_to_raw_method in ("hanatos2025", "hanatos2026"):
+        if self._settings.rgb_to_raw_method == "hanatos2025":
             tc_lut = self._lut_service.get_filming_tc_lut(sensitivity)
             raw = rgb_to_raw_hanatos2025(
                 rgb,
@@ -161,6 +174,15 @@ class FilmingStage:
                 reference_illuminant=self._film.info.reference_illuminant,
                 tc_lut=tc_lut,
             )
+        elif self._settings.rgb_to_raw_method == "arctic2026beta04":
+            tc_lut = self._lut_service.get_arctic2026beta04_tc_lut(
+                sensitivity, self._film.info.reference_illuminant,
+                neutral_sensitivity=neutral_sensitivity)
+            raw = rgb_to_raw_arctic2026beta04(
+                rgb, sensitivity, color_space=color_space,
+                apply_cctf_decoding=apply_cctf_decoding,
+                reference_illuminant=self._film.info.reference_illuminant,
+                tc_lut=tc_lut)
         elif self._settings.rgb_to_raw_method == "mallett2019":
             raw = rgb_to_raw_mallett2019(rgb, sensitivity,
                             color_space=color_space,

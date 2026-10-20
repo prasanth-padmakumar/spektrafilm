@@ -19,9 +19,14 @@ class Simulator:
     def __init__(self, params: RuntimePhotoParams):
         self._pipeline = SimulationPipeline(params) # should stay private
 
-    def process(self, image):
+    def process(self, image, *, on_tap=None):
         """Process the input image through the simulation pipeline and return the final result."""
-        return self._pipeline.process(image)
+        if on_tap is None:
+            return self._pipeline.process(image)
+        return self._pipeline.process(image, on_tap=on_tap)
+
+    def process_with_diagnostics(self, image, on_tap):
+        return self._pipeline.process(image, on_tap=on_tap)
 
     def update_params(self, params):
         """Update the parameters of the simulation pipeline."""

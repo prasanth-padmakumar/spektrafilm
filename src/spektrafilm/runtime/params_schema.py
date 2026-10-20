@@ -90,6 +90,20 @@ class ScannerParams:
 @dataclass
 class GrainParams:
     active: bool = True
+    model: str = "layered"
+    synthesis_amount: float = 1.0
+    synthesis_samples: int = 16
+    synthesis_mean_radius_um: float = 0.6
+    synthesis_radius_stddev_ratio: float = 0.4
+    synthesis_cell_size_ratio: float = 4.0
+    synthesis_max_grains_per_cell: int = 32
+    model: str = "layered"
+    synthesis_amount: float = 1.0
+    synthesis_samples: int = 16
+    synthesis_mean_radius_um: float = 0.6
+    synthesis_radius_stddev_ratio: float = 0.4
+    synthesis_cell_size_ratio: float = 4.0
+    synthesis_max_grains_per_cell: int = 32
     # pixel statistics
     rms_granularity: tuple[float, float, float] = (6, 8, 10)
     density_min: tuple[float, float, float] = (0.03, 0.03, 0.03)

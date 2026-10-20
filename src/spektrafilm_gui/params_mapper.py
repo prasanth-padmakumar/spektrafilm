@@ -30,6 +30,7 @@ def build_params_from_state(state: GuiState) -> RuntimePhotoParams:
 
 
 def _apply_special(params: RuntimePhotoParams, state: GuiState) -> None:
+    params.debug.deactivate_stochastic_effects = state.special.deterministic_parity
     def swap_channels(profile, new_cmy_order=(0,2,1)):
         profile.data.channel_density = profile.data.channel_density[:,new_cmy_order]
         return profile

@@ -581,6 +581,7 @@ class SpecialSection(QWidget):
         state = clone_state_section(self._source) if self._source is not None else SpecialState(
             film_channel_swap=(0, 1, 2),
             print_channel_swap=(0, 1, 2),
+            deterministic_parity=False,
         )
         for spec in self._specs.values():
             _write_path(state, spec.path, self._editors[spec.leaf].value)

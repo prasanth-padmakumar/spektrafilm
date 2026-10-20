@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import pytest
 from spektrafilm.model.density_curves import interpolate_exposure_to_density
@@ -6,6 +7,8 @@ from spektrafilm.model.couplers import (
     compute_dir_couplers_matrix,
     compute_density_curves_before_dir_couplers,
     compute_exposure_correction_dir_couplers,
+    _dir_curve_diagnostics,
+    _write_dir_curve_diagnostics,
     langmuir_donor_params,
     receiver_langmuir_params,
 )
@@ -16,6 +19,33 @@ pytestmark = pytest.mark.unit
 
 
 class TestDirCouplers:
+    def test_dir_curve_diagnostics_capture_curve_summary_and_samples(self, tmp_path, monkeypatch):
+        curves = np.array([
+            [0.0, 0.1, 0.2],
+            [0.2, 0.3, 0.4],
+            [0.4, 0.5, 0.6],
+            [0.6, 0.7, 0.8],
+            [0.8, 0.9, 1.0],
+        ])
+        diagnostics = _dir_curve_diagnostics(
+            curves,
+            np.array([0.8, 0.9, 1.0]),
+            np.array([0.4, 0.45, 0.5]),
+        )
+        path = tmp_path / "dir_curves.json"
+        monkeypatch.setenv("SPEKTRAFILM_PYTHON_DIR_CURVES_DIAGNOSTIC", str(path))
+        _write_dir_curve_diagnostics(diagnostics)
+
+        written = json.loads(path.read_text(encoding="utf-8"))
+        assert written["curve_count"] == 5
+        assert written["curve_min"] == [0.0, 0.1, 0.2]
+        assert written["curve_max"] == [0.8, 0.9, 1.0]
+        assert written["curve_sample_indices"] == [0, 1, 2, 3, 4]
+        assert written["curve_samples"] == curves.tolist()
+        assert written["density_max"] == [0.8, 0.9, 1.0]
+        assert written["donor_k"] == [0.8, 0.9, 1.0]
+        assert written["donor_ref"] == [0.4, 0.45, 0.5]
+
     def test_no_interlayer_inhibition_is_diagonal(self):
         """With zero interlayer inhibition, the matrix should be diagonal (no cross-layer effect)."""
         params = DirCouplersParams(inhibition_interlayer=0.0)

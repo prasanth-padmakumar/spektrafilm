@@ -1,6 +1,13 @@
 from __future__ import annotations
 
 import threading
+import json
+import hashlib
+import math
+import os
+import subprocess
+import tempfile
+import time
 from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
@@ -31,6 +38,7 @@ from spektrafilm_gui.napari_layout import dialog_parent, reset_viewer_camera, se
 from spektrafilm_gui.params_mapper import build_params_from_state
 from spektrafilm_gui.state_bridge import apply_gui_state, collect_gui_state
 from spektrafilm_gui.widgets import WidgetBundle
+from spektrafilm.utils.auto_levels import apply_auto_levels
 
 def _family_development_times(profile) -> np.ndarray:
     """A stock's development-time choices as a 1-D array, always non-empty.
@@ -62,6 +70,60 @@ QMessageBox = QtWidgets.QMessageBox
 SimulationRequest = runtime.SimulationRequest
 SimulationResult = runtime.SimulationResult
 STARTUP_PREVIEW_ASPECT_RATIO = (3, 2)
+
+
+def _rust_f64_cli() -> Path | None:
+    candidates = []
+    if os.environ.get('SPEKTRAFILM_F64_CLI'):
+        candidates.append(Path(os.environ['SPEKTRAFILM_F64_CLI']))
+    candidates.extend([
+        Path('spektrafilm-f64.exe'),
+        Path(__file__).resolve().parents[3] / 'spektrafilm-rs' / 'target' / 'release' / 'spektrafilm-f64.exe',
+        Path(__file__).resolve().parents[3] / 'spektrafilm-rs' / 'target' / 'release' / 'spektrafilm-f64',
+    ])
+    return next((p for p in candidates if p.is_file()), None)
+
+
+def _jsonable(value):
+    if isinstance(value, np.ndarray):
+        return _jsonable(value.tolist())
+    if isinstance(value, (np.integer, np.floating, np.bool_)):
+        value = value.item()
+    if isinstance(value, float):
+        # Rust's serde_json rejects non-finite JSON values.  The Python
+        # reference uses NaN for unavailable density/profile samples; Rust's
+        # profile defaults represent those samples as zero.
+        return value if math.isfinite(value) else 0.0
+    if hasattr(value, '__dataclass_fields__'):
+        return {name: _jsonable(getattr(value, name)) for name in value.__dataclass_fields__}
+    if isinstance(value, dict):
+        return {key: _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
+def _format_scan_image_stats(value: np.ndarray, *, sample_percentiles: bool = False) -> str:
+    array = np.asarray(value, dtype=np.float64)
+    flat = array.reshape(-1)
+    if sample_percentiles:
+        sample_step = max(1, math.ceil(flat.size / 1_000_000))
+        percentile_sample = flat[::sample_step]
+    else:
+        percentile_sample = flat
+    chroma = np.max(array, axis=-1) - np.min(array, axis=-1)
+    return (f"shape={array.shape} dtype={array.dtype} "
+            f"min={np.nanmin(array):.8g} max={np.nanmax(array):.8g} "
+            f"mean={np.nanmean(array):.8g} median={np.nanmedian(percentile_sample):.8g} "
+            f"p01={np.nanpercentile(percentile_sample, 1):.8g} "
+            f"p99={np.nanpercentile(percentile_sample, 99):.8g} "
+            f"{f'percentile_sample_count={percentile_sample.size} ' if sample_percentiles else ''}"
+            f"channel_mean={np.nanmean(array, axis=(0, 1))} "
+            f"channel_p01={np.nanpercentile(array, 1, axis=(0, 1))} "
+            f"channel_p99={np.nanpercentile(array, 99, axis=(0, 1))} "
+            f"nan_count={np.isnan(array).sum()} inf_count={np.isinf(array).sum()} "
+            f"chroma_mean={np.nanmean(chroma):.8g} "
+            f"chroma_p99={np.nanpercentile(chroma, 99):.8g}")
 
 
 class _DirMemoryDialog:
@@ -154,6 +216,9 @@ class GuiController:
     def __init__(self, *, viewer: napari.Viewer, widgets: WidgetBundle):
         self._viewer = viewer
         self._widgets = widgets
+        self._logging_python_scan = False
+        self._python_scan_taps = {}
+        self._python_scan_raw_stats = {}
         self._layers = ViewerLayerService(
             viewer=viewer,
             output_float_data_key=OUTPUT_FLOAT_DATA_KEY,
@@ -323,7 +388,187 @@ class GuiController:
         )
 
     def run_scan(self) -> None:
+        state = collect_gui_state(widgets=self._widgets)
+        if state.simulation.workflow.export_engine == 'rust_f64':
+            set_status(self._viewer, 'Computing Rust f64 scan...', timeout_ms=0)
+            self._jobs.submit(
+                'scan',
+                # Honor the output color space selected in the UI.  Do not
+                # silently replace ProPhoto RGB with sRGB for Rust scans.
+                lambda: self._rust_scan_job(state),
+                on_done=lambda result: self._on_rust_scan_finished(result, state),
+                on_error=lambda message: self._on_simulation_failed(message, mode_label='Rust scan'),
+            )
+            return
         self._start_simulation(source_layer_name=INPUT_LAYER_NAME, mode_label='Scan', channel='scan')
+
+    def _rust_scan_job(self, state, *, render_output_color_space=None):
+        if self._current_input_path is None:
+            raise RuntimeError('Rust scan requires the original input image path.')
+        cli = _rust_f64_cli()
+        if cli is None:
+            raise RuntimeError('spektrafilm-f64 was not found.')
+        source_image = self._simulation_input_image(source_layer_name=INPUT_LAYER_NAME)
+        if source_image is None:
+            raise RuntimeError('Load an input image before running the scan.')
+        output_path = Path(tempfile.mktemp(suffix='.tiff'))
+        input_path = Path(tempfile.mktemp(suffix='.tiff'))
+        params_path = None
+        # Keep diagnostics beside python_scan.log even when the GUI is
+        # launched from a shortcut or a different working directory.
+        log_path = Path(__file__).resolve().parents[2].parent / 'rust_f64_scan.log'
+        log_lines = []
+        try:
+            params = build_params_from_state(state)
+            save_image_oiio(str(input_path), np.asarray(source_image)[..., :3],
+                            color_space=state.input_image.io.input_color_space,
+                            cctf_encoding=False)
+            # Preserve the GUI input contract. The temporary file preserves
+            # the source pixel values; its container flag must not override
+            # the user's ProPhoto/sRGB CCTF-decoding choice.
+            params.io.input_cctf_decoding = state.input_image.io.input_cctf_decoding
+            if render_output_color_space is not None:
+                params.io.output_color_space = render_output_color_space
+            source_array = np.asarray(source_image)[..., :3]
+            log_lines.append(f'input shape={source_array.shape} dtype={source_array.dtype} '
+                             f'min={np.nanmin(source_array):.8g} max={np.nanmax(source_array):.8g} '
+                             f'mean={np.nanmean(source_array):.8g}')
+            with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False, encoding='utf-8') as handle:
+                json.dump(_jsonable(params), handle, allow_nan=False)
+                params_path = Path(handle.name)
+            run_id = f"rust-{time.time_ns()}"
+            input_sha256 = hashlib.sha256(np.ascontiguousarray(source_array).tobytes()).hexdigest()
+            params_json = json.dumps(_jsonable(params), sort_keys=True, allow_nan=False)
+            params_sha256 = hashlib.sha256(params_json.encode('utf-8')).hexdigest()
+            log_lines[0:0] = [
+                'engine=rust_f64',
+                f'run_id={run_id}',
+                f'input_sha256={input_sha256}',
+                f'parameters_sha256={params_sha256}',
+            ]
+            command = [str(cli), 'process', str(input_path), '-o', str(output_path),
+                       '--film', state.simulation.selection.film_stock,
+                       '--paper', state.simulation.selection.print_paper,
+                       '--data-dir', str(cli.parents[2] / 'data'), '--params', str(params_path)]
+            log_lines.append('command=' + ' '.join(f'"{part}"' for part in command))
+            log_lines.append('params=' + json.dumps(_jsonable(params), allow_nan=False, indent=2))
+            env = os.environ.copy()
+            env['RUST_LOG'] = 'info'
+            env['SPEKTRAFILM_PARITY_STATS'] = '1'
+            # The f64 export binary must use the CPU path. If the default
+            # backend is left enabled, the binary selects wgpu and silently
+            # runs the f32 GPU approximation instead.
+            env['SPEKTRAFILM_BACKEND'] = 'cpu'
+            env['SPEKTRAFILM_RUN_ID'] = run_id
+            env['SPEKTRAFILM_INPUT_SHA256'] = input_sha256
+            env['SPEKTRAFILM_PARAMETERS_SHA256'] = params_sha256
+            result = subprocess.run(command, capture_output=True, text=True, env=env)
+            log_lines.append('--- stdout ---')
+            log_lines.append(result.stdout or '')
+            log_lines.append('--- stderr ---')
+            log_lines.append(result.stderr or '')
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout).strip())
+            image = np.asarray(load_image_oiio(str(output_path)))[..., :3]
+            log_lines.append(f'output shape={image.shape} dtype={image.dtype} '
+                             f'min={np.nanmin(image):.8g} max={np.nanmax(image):.8g} '
+                             f'mean={np.nanmean(image):.8g}')
+            return image, log_path, params.io.output_color_space
+        finally:
+            log_path.write_text('\n'.join(log_lines), encoding='utf-8')
+            output_path.unlink(missing_ok=True)
+            input_path.unlink(missing_ok=True)
+            if params_path is not None:
+                params_path.unlink(missing_ok=True)
+
+    def _on_rust_scan_finished(self, image, state) -> None:
+        image, log_path, rendered_color_space = image
+        image = apply_auto_levels(np.asarray(image), state.simulation.io.auto_levels)
+        display = colour.RGB_to_RGB(
+            image,
+            rendered_color_space,
+            'sRGB',
+            # Rust returns output_cctf_encoding=true; decode its encoded
+            # result before converting it for display.
+            apply_cctf_decoding=True,
+            apply_cctf_encoding=True,
+        )
+        display = np.uint8(np.clip(display, 0.0, 1.0) * 255.0)
+        self._set_or_add_output_layer(
+            display,
+            float_image=image,
+            output_color_space=rendered_color_space,
+            output_cctf_encoding=True,
+            use_display_transform=False,
+        )
+        set_status(self._viewer, f'Rust f64 scan completed. Log: {log_path}')
+
+    def _run_rust_scan(self, state) -> None:
+        if self._current_input_path is None:
+            QMessageBox.warning(dialog_parent(self._viewer), 'Rust scan', 'Rust scan requires the original input image path.')
+            return
+        cli = _rust_f64_cli()
+        if cli is None:
+            QMessageBox.warning(dialog_parent(self._viewer), 'Rust scan', 'spektrafilm-f64 was not found.')
+            return
+        source_image = self._simulation_input_image(source_layer_name=INPUT_LAYER_NAME)
+        if source_image is None:
+            QMessageBox.warning(dialog_parent(self._viewer), 'Rust scan', 'Load an input image before running the scan.')
+            return
+        with tempfile.NamedTemporaryFile(suffix='.tiff', delete=False) as handle:
+            output_path = Path(handle.name)
+        with tempfile.NamedTemporaryFile(suffix='.tiff', delete=False) as handle:
+            input_path = Path(handle.name)
+        try:
+            params = build_params_from_state(state)
+            # Python has already decoded RAW, applied white balance/lens
+            # corrections, and converted the input to linear RGB. Feed that
+            # exact image to Rust instead of making Rust decode the camera RAW
+            # independently with different defaults.
+            save_image_oiio(str(input_path), np.asarray(source_image)[..., :3],
+                            color_space=state.input_image.io.input_color_space,
+                            cctf_encoding=False)
+            params.io.input_cctf_decoding = False
+            with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False, encoding='utf-8') as handle:
+                json.dump(_jsonable(params), handle, allow_nan=False)
+                params_path = Path(handle.name)
+            try:
+                command = [str(cli), 'process', str(input_path), '-o', str(output_path),
+                           '--film', state.simulation.selection.film_stock,
+                           '--paper', state.simulation.selection.print_paper,
+                           '--data-dir', str(cli.parents[2] / 'data'), '--params', str(params_path)]
+                set_status(self._viewer, 'Computing Rust f64 scan...', timeout_ms=0)
+                QtWidgets.QApplication.processEvents()
+                result = subprocess.run(command, capture_output=True, text=True)
+            finally:
+                params_path.unlink(missing_ok=True)
+            if result.returncode != 0:
+                raise RuntimeError((result.stderr or result.stdout).strip())
+            # Rust writes the final PNG/JPEG/TIFF in its output encoding. Do
+            # not pass it through Python's linear-light display transform a
+            # second time; that would crush the shadows and desaturate the
+            # image.
+            image = np.asarray(load_image_oiio(str(output_path)))[..., :3]
+            # Rust currently does not implement Python's post-scan auto-levels
+            # stage. Apply the same inexpensive operation after loading the
+            # Rust-encoded result; this is why the raw Rust image is darker
+            # than the Python reference when auto-levels are enabled.
+            image = apply_auto_levels(image, state.simulation.io.auto_levels)
+            display_image, status = self._prepare_output_display_image(
+                image,
+                output_color_space=state.simulation.io.output_color_space,
+                use_display_transform=state.gui_only.display.use_display_transform,
+            )
+            self._set_or_add_output_layer(display_image, float_image=image,
+                                          output_color_space=state.simulation.io.output_color_space,
+                                          output_cctf_encoding=True,
+                                          use_display_transform=state.gui_only.display.use_display_transform)
+            set_status(self._viewer, f'Rust f64 scan completed. {status}')
+        except Exception as exc:
+            QMessageBox.critical(dialog_parent(self._viewer), 'Rust scan', f'Rust scan failed.\n\n{exc}')
+        finally:
+            output_path.unlink(missing_ok=True)
+            input_path.unlink(missing_ok=True)
 
     def request_auto_preview(self, *_args) -> None:
         if self._auto_preview_scheduled:
@@ -392,6 +637,12 @@ class GuiController:
         )
         saving_color_space = gui_state.simulation.workflow.saving_color_space
         saving_cctf_encoding = gui_state.simulation.workflow.saving_cctf_encoding
+        # JPEG is always emitted as standard display-referred sRGB. Keep the
+        # working/output space unchanged for TIFF/EXR, but never write a
+        # ProPhoto JPEG that ordinary viewers interpret incorrectly.
+        if Path(filepath).suffix.lower() in {'.jpg', '.jpeg'}:
+            saving_color_space = 'sRGB'
+            saving_cctf_encoding = True
         if source_color_space != saving_color_space:
             image_data = colour.RGB_to_RGB(
                 image_data,
@@ -443,6 +694,52 @@ class GuiController:
             )
         else:
             set_status(self._viewer, f"Saved output image to {filepath}")
+
+    def _save_output_with_rust(self, filepath: str, gui_state) -> bool:
+        cli = _rust_f64_cli()
+        if cli is None:
+            QMessageBox.warning(dialog_parent(self._viewer), 'Rust export',
+                                'spektrafilm-f64 was not found. Set SPEKTRAFILM_F64_CLI or build spektrafilm-rs.')
+            return False
+        if self._current_input_path is None:
+            QMessageBox.warning(dialog_parent(self._viewer), 'Rust export',
+                                'Rust export requires the original input image path.')
+            return False
+        try:
+            set_status(self._viewer, 'Computing Rust f64 export...', timeout_ms=0)
+            QtWidgets.QApplication.processEvents()
+            jpeg_output = Path(filepath).suffix.lower() in {'.jpg', '.jpeg'}
+            rendered = self._rust_scan_job(
+                gui_state,
+                render_output_color_space='sRGB' if jpeg_output else None,
+            )
+            image, log_path, rendered_color_space = rendered
+            image = apply_auto_levels(image, gui_state.simulation.io.auto_levels)
+            saving_color_space = gui_state.simulation.workflow.saving_color_space
+            saving_cctf_encoding = gui_state.simulation.workflow.saving_cctf_encoding
+            # JPEG is an interchange/display format. Always write it as
+            # standard sRGB, even when the working/output space is ProPhoto.
+            if jpeg_output:
+                saving_color_space = 'sRGB'
+                saving_cctf_encoding = True
+            image_data = colour.RGB_to_RGB(
+                image,
+                rendered_color_space,
+                saving_color_space,
+                # Rust returns output_cctf_encoding=true.
+                apply_cctf_decoding=True,
+                apply_cctf_encoding=saving_cctf_encoding,
+            )
+            # image_data already has the requested CCTF from RGB_to_RGB;
+            # applying it again in the image writer would double-encode JPEG.
+            save_image_oiio(filepath, image_data, color_space=saving_color_space,
+                            cctf_encoding=False)
+            set_status(self._viewer, f'Saved Rust f64 output to {filepath} (log: {log_path})')
+            return True
+        except Exception as exc:
+            QMessageBox.critical(dialog_parent(self._viewer), 'Rust export',
+                                 f'Rust export failed.\n\n{exc}')
+            return False
 
     def save_current_as_default(self) -> None:
         persistence_actions.save_current_as_default(
@@ -675,7 +972,10 @@ class GuiController:
             else:
                 self._runtime_simulator.update_params(digested_params)
             self._next_runtime_digest_applies_stock_specifics = False
-            return self._runtime_simulator.process(image_data)
+            return self._runtime_simulator.process_with_diagnostics(
+                image_data,
+                self._python_scan_tap_callback if self._logging_python_scan else None,
+            )
         except Exception:
             self._runtime_simulator = None
             raise
@@ -711,11 +1011,68 @@ class GuiController:
         # flight on two worker threads at once; the lock serializes their use of
         # the single shared runtime simulator (and the display path).
         with self._runtime_lock:
-            return runtime.execute_simulation_request(
-                request,
-                run_simulation_fn=self._process_image_with_runtime,
-                prepare_output_display_image_fn=self._prepare_output_display_image,
-            )
+            self._logging_python_scan = request.mode_label == 'Scan'
+            self._python_scan_taps = {}
+            self._python_scan_raw_stats = {}
+            dir_curve_diagnostic_path = None
+            diagnostic_env = {
+                'SPEKTRAFILM_PYTHON_DUMP_FILM_DENSITY_INTERP': str(
+                    Path(__file__).resolve().parents[2].parent / 'python_scan.filming_density_interp.f64'
+                ),
+                'SPEKTRAFILM_PYTHON_DUMP_FILM_DIR_COUPLERS': str(
+                    Path(__file__).resolve().parents[2].parent / 'python_scan.filming_dir_couplers.f64'
+                ),
+                'SPEKTRAFILM_PYTHON_DUMP_DIR_CORRECTION': str(
+                    Path(__file__).resolve().parents[2].parent / 'python_scan.dir_correction.f64'
+                ),
+                'SPEKTRAFILM_PYTHON_DUMP_DIR_DONOR': str(
+                    Path(__file__).resolve().parents[2].parent / 'python_scan.dir_donor.f64'
+                ),
+                'SPEKTRAFILM_PYTHON_DUMP_DIR_MATRIX': str(
+                    Path(__file__).resolve().parents[2].parent / 'python_scan.dir_matrix.f64'
+                ),
+            }
+            if self._logging_python_scan:
+                with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as diagnostic_file:
+                    dir_curve_diagnostic_path = Path(diagnostic_file.name)
+                diagnostic_env['SPEKTRAFILM_PYTHON_DIR_CURVES_DIAGNOSTIC'] = str(
+                    dir_curve_diagnostic_path
+                )
+            old_diagnostic_env = {key: os.environ.get(key) for key in diagnostic_env}
+            try:
+                if self._logging_python_scan:
+                    os.environ.update(diagnostic_env)
+                result = runtime.execute_simulation_request(
+                    request,
+                    run_simulation_fn=self._process_image_with_runtime,
+                    prepare_output_display_image_fn=self._prepare_output_display_image,
+                )
+                dir_curve_diagnostics = None
+                if dir_curve_diagnostic_path and dir_curve_diagnostic_path.stat().st_size:
+                    dir_curve_diagnostics = json.loads(
+                        dir_curve_diagnostic_path.read_text(encoding='utf-8')
+                    )
+                if request.mode_label == 'Scan':
+                    self._write_python_scan_log(
+                        request.image,
+                        result.float_image,
+                        request.params,
+                        self._python_scan_taps,
+                        self._python_scan_raw_stats,
+                        self._runtime_simulator.get_timings(),
+                        self._runtime_simulator.get_total_elapsed_time(),
+                        dir_curve_diagnostics,
+                    )
+                return result
+            finally:
+                self._logging_python_scan = False
+                for key, value in old_diagnostic_env.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+                if dir_curve_diagnostic_path:
+                    dir_curve_diagnostic_path.unlink(missing_ok=True)
 
     @staticmethod
     def _configure_simulation_params(params, *, source_layer_name: str):
@@ -823,6 +1180,8 @@ class GuiController:
 
         image = np.double(image_data)
         scan = self._process_image_with_runtime(image, params)
+        if source_layer_name == INPUT_LAYER_NAME:
+            self._write_python_scan_log(image, scan, params)
         scan_display, display_status = self._prepare_output_display_image(
             scan,
             output_color_space=state.simulation.io.output_color_space,
@@ -836,3 +1195,74 @@ class GuiController:
             use_display_transform=state.gui_only.display.use_display_transform,
         )
         set_status(self._viewer, display_status)
+
+    def _python_scan_tap_callback(self, tap: str, value) -> None:
+        names = {
+            'rgb_pre': 'input_rescaled',
+            'raw_before_auto_exposure': 'raw_before_auto_exposure',
+            'raw_after_auto_exposure': 'raw_after_auto_exposure',
+            'log_e_film': 'filming_log_exposure',
+            'cmy_film': 'filming_density',
+            'log_e_print': 'printing_log_exposure',
+            'cmy_print': 'printing_density',
+            'rgb_out': 'scan_output_encoded',
+        }
+        name = names.get(tap)
+        if name is not None:
+            if name.startswith('raw_'):
+                self._python_scan_raw_stats[name] = _format_scan_image_stats(
+                    value, sample_percentiles=True
+                )
+                self._python_scan_taps[name] = np.asarray(value).copy()
+                return
+            self._python_scan_taps[name] = np.asarray(value).copy()
+
+    def _write_python_scan_log(self, source: np.ndarray, output: np.ndarray, params,
+                               taps=None, raw_stats=None, timings=None,
+                               total_elapsed=None, dir_curve_diagnostics=None) -> None:
+        """Persist comparable Python scan statistics beside the Rust log."""
+        def stats(value: np.ndarray) -> str:
+            return _format_scan_image_stats(value)
+        # The GUI may be launched with a different working directory. Keep
+        # this beside the workspace-level Rust log so both files are easy to
+        # compare.
+        path = Path(__file__).resolve().parents[2].parent / 'python_scan.log'
+        dump_stages = (
+            'raw_before_auto_exposure', 'raw_after_auto_exposure',
+            'filming_density', 'printing_log_exposure', 'printing_density',
+        )
+        dump_paths = []
+        for stage in dump_stages:
+            value = (taps or {}).get(stage)
+            if value is None:
+                continue
+            dump_path = path.with_suffix(f'.{stage}.f64')
+            np.asarray(value, dtype='<f8').tofile(dump_path)
+            dump_paths.append(f'{stage}_dump={dump_path}')
+        source_bytes = np.ascontiguousarray(source).tobytes()
+        params_json = json.dumps(_jsonable(params), sort_keys=True, allow_nan=False)
+        run_id = f"python-{time.time_ns()}"
+        lines = [
+            'engine=python',
+            f'run_id={run_id}',
+            f'input_sha256={hashlib.sha256(source_bytes).hexdigest()}',
+            f'parameters_sha256={hashlib.sha256(params_json.encode("utf-8")).hexdigest()}',
+            f'input={stats(source)}',
+            *(f'{name}={value}' for name, value in (raw_stats or {}).items()),
+            *(f'{name}={stats(value)}' for name, value in (taps or {}).items()),
+            *(
+                ['dir_curve_diagnostics=' + json.dumps(
+                    dir_curve_diagnostics, sort_keys=True, allow_nan=False
+                )]
+                if dir_curve_diagnostics is not None else []
+            ),
+            f'output={stats(output)}',
+            f'pipeline_seconds={total_elapsed if total_elapsed is not None else "unavailable"}',
+            'stage_timings=' + json.dumps(timings or {}, sort_keys=True),
+            *dump_paths,
+        ]
+        path.write_text(
+            '\n'.join(lines) + '\n'
+            'params=' + json.dumps(_jsonable(params), indent=2, allow_nan=False),
+            encoding='utf-8',
+        )

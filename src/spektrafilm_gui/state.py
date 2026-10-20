@@ -53,6 +53,7 @@ class LoadRawState:
 class SpecialState:
     film_channel_swap: tuple[int, int, int]
     print_channel_swap: tuple[int, int, int]
+    deterministic_parity: bool = False
 
 
 @dataclass(slots=True)
@@ -65,6 +66,7 @@ class SelectionState:
 class SimulationWorkflowState:
     saving_color_space: str
     saving_cctf_encoding: bool
+    export_engine: str
     auto_preview: bool
 
 
@@ -76,6 +78,7 @@ class SimulationState:
     workflow: SimulationWorkflowState = field(default_factory=lambda: SimulationWorkflowState(
         saving_color_space='sRGB',
         saving_cctf_encoding=True,
+        export_engine='python',
         auto_preview=True,
     ))
 
@@ -169,6 +172,7 @@ def normalize_simulation_dict(data: dict[str, Any]) -> dict[str, Any]:
             ),
         },
         'workflow': {
+            'export_engine': data.get('export_engine', PROJECT_DEFAULT_GUI_STATE.simulation.workflow.export_engine),
             'saving_color_space': data.get('saving_color_space', PROJECT_DEFAULT_GUI_STATE.simulation.workflow.saving_color_space),
             'saving_cctf_encoding': data.get('saving_cctf_encoding', PROJECT_DEFAULT_GUI_STATE.simulation.workflow.saving_cctf_encoding),
             'auto_preview': data.get('auto_preview', PROJECT_DEFAULT_GUI_STATE.simulation.workflow.auto_preview),
@@ -326,6 +330,7 @@ def gui_state_from_params(
         special=SpecialState(
             film_channel_swap=(0, 1, 2),
             print_channel_swap=(0, 1, 2),
+            deterministic_parity=False,
         ),
         simulation=SimulationState(
             selection=SelectionState(
@@ -350,6 +355,7 @@ def gui_state_from_params(
             workflow=SimulationWorkflowState(
                 saving_color_space="sRGB",
                 saving_cctf_encoding=params.io.output_cctf_encoding,
+                export_engine="python",
                 auto_preview=True,
             ),
         ),
