@@ -1,46 +1,9 @@
-import json
-import os
 import numpy as np
 from opt_einsum import contract
 
 from spektrafilm.runtime.params_schema import DirCouplersParams
 from spektrafilm.utils.fast_gaussian_filter import fast_gaussian_filter, fast_exponential_filter
 from spektrafilm.model.density_curves import interpolate_exposure_to_density
-
-
-def _dir_curve_diagnostics(density_curves, donor_k, donor_ref):
-    curves = np.asarray(density_curves, dtype=float)
-    curve_count = int(curves.shape[0])
-    sample_indices = sorted(set(
-        [0, curve_count // 4, curve_count // 2, (3 * curve_count) // 4, curve_count - 1]
-    )) if curve_count else []
-
-    def json_values(values):
-        return [
-            [float(value) if np.isfinite(value) else None for value in row]
-            for row in np.asarray(values).reshape(-1, 3)
-        ]
-
-    curve_min = np.nanmin(curves, axis=0) if curve_count else np.full(3, np.nan)
-    curve_max = np.nanmax(curves, axis=0) if curve_count else np.full(3, np.nan)
-    return {
-        "curve_count": curve_count,
-        "curve_min": json_values([curve_min])[0],
-        "curve_max": json_values([curve_max])[0],
-        "curve_sample_indices": sample_indices,
-        "curve_samples": json_values(curves[sample_indices]) if sample_indices else [],
-        "density_max": json_values([curve_max])[0],
-        "donor_k": json_values([donor_k])[0],
-        "donor_ref": json_values([donor_ref])[0],
-    }
-
-
-def _write_dir_curve_diagnostics(diagnostics):
-    path = os.environ.get("SPEKTRAFILM_PYTHON_DIR_CURVES_DIAGNOSTIC")
-    if path:
-        with open(path, "w", encoding="utf-8") as diagnostic_file:
-            json.dump(diagnostics, diagnostic_file, sort_keys=True, allow_nan=False)
-
 
 # ---- Langmuir saturating donor (DIR inhibitor release) ----------------------
 
@@ -287,9 +250,6 @@ def apply_density_correction_dir_couplers(
     # correction so both apply the same saturation.
     langmuir_k, langmuir_d_ref = langmuir_donor_params(
         density_curves, dir_couplers.langmuir_donor_k_rgb, n_ch=n_ch)
-    _write_dir_curve_diagnostics(
-        _dir_curve_diagnostics(density_curves, langmuir_k, langmuir_d_ref)
-    )
 
     if positive:
         # Reversal interimage (Shuto et al. 1997, n110): linear first-dev silver

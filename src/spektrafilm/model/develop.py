@@ -1,5 +1,3 @@
-import os
-from pathlib import Path
 from typing import Literal, TypeAlias
 from scipy.ndimage import gaussian_filter1d
 
@@ -17,10 +15,6 @@ from spektrafilm.config import SPECTRAL_SHAPE
 FloatArray: TypeAlias = NDArray[np.float64]
 
 
-def _dump_diagnostic(name: str, value: np.ndarray) -> None:
-    path = os.environ.get(name)
-    if path is not None:
-        np.asarray(value, dtype='<f8').tofile(Path(path))
 ProfileType: TypeAlias = Literal['negative', 'positive']
 
 ################################################################################
@@ -99,7 +93,6 @@ def develop(
         normalized_density_curves,
         gamma_factor=gamma_factor,
     )
-    _dump_diagnostic('SPEKTRAFILM_PYTHON_DUMP_FILM_DENSITY_INTERP', density_cmy)
     density_cmy = apply_density_correction_dir_couplers(
         density_cmy,
         log_raw,
@@ -110,7 +103,6 @@ def develop(
         profile_type,
         gamma_factor=gamma_factor,
     )
-    _dump_diagnostic('SPEKTRAFILM_PYTHON_DUMP_FILM_DIR_COUPLERS', density_cmy)
     return apply_grain(
         density_cmy,
         pixel_size_um,
@@ -151,4 +143,3 @@ def develop_print_morph(
 
 if __name__ == '__main__':
     pass
-

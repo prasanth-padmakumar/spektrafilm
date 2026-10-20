@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import numpy as np
 
 from spektrafilm.model.color_filters import color_filter_transmittance
@@ -45,22 +43,13 @@ class FilmingStage:
 
     # public methods
 
-    def expose(
-        self,
-        image: np.ndarray,
-        *,
-        on_raw: Callable[[str, np.ndarray], None] | None = None,
-    ) -> np.ndarray:
+    def expose(self, image: np.ndarray) -> np.ndarray:
         raw = self._rgb_to_film_raw(
             image,
             color_space=self._io.input_color_space,
             apply_cctf_decoding=self._io.input_cctf_decoding,
         )
-        if on_raw is not None:
-            on_raw("raw_before_auto_exposure", raw)
         raw = self._auto_exposure(raw)
-        if on_raw is not None:
-            on_raw("raw_after_auto_exposure", raw)
         raw *= 2 ** self._camera.exposure_compensation_ev
         boost_highlights(raw, self._film_render.halation.boost_ev,
                          self._film_render.halation.boost_range,
