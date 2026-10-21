@@ -63,6 +63,7 @@ def run_topology(
     image: Any,
     *,
     on_fire: Callable[[Node, float], None] | None = None,
+    on_tap: Callable[[str, Any], None] | None = None,
 ) -> Any:
     """Walk ``topology`` in declared order, firing every node whose reads
     are satisfied. Stops as soon as ``collect`` is in state and returns it.
@@ -72,6 +73,8 @@ def run_topology(
     record per-node timings.
     """
     state: dict[str, Any] = {inject: image}
+    if on_tap is not None:
+        on_tap(inject, image)
     for node in topology:
         if all(k in state for k in node.reads):
             t0 = perf_counter()
@@ -79,6 +82,9 @@ def run_topology(
             elapsed = perf_counter() - t0
             if on_fire is not None:
                 on_fire(node, elapsed)
+            if on_tap is not None:
+                for tap in node.writes:
+                    on_tap(tap, state[tap])
             if collect in state:
                 return state[collect]
     raise RuntimeError(

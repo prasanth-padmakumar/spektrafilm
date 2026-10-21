@@ -33,10 +33,15 @@ from spektrafilm_gui.persistence import (
 )
 from spektrafilm_gui.state import PROJECT_DEFAULT_GUI_STATE, digest_after_selection, gui_state_from_params
 from spektrafilm_gui.napari_layout import dialog_parent, reset_viewer_camera, set_canvas_background, set_status
-from spektrafilm_gui.params_mapper import build_params_from_state
+from spektrafilm_gui.params_mapper import build_params_from_state, prepare_rust_scan_params
+from spektrafilm_gui.scan_diagnostics import (
+    image_statistics,
+    parse_rust_calibration,
+    parse_rust_stage_statistics,
+    write_scan_diagnostics,
+)
 from spektrafilm_gui.state_bridge import apply_gui_state, collect_gui_state
 from spektrafilm_gui.widgets import WidgetBundle
-from spektrafilm.utils.auto_levels import apply_auto_levels
 
 def _family_development_times(profile) -> np.ndarray:
     """A stock's development-time choices as a 1-D array, always non-empty.
@@ -70,16 +75,69 @@ SimulationResult = runtime.SimulationResult
 STARTUP_PREVIEW_ASPECT_RATIO = (3, 2)
 
 
+class _RustProgressRelay(getattr(QtCore, 'QObject')):
+    """Moves progress text from the worker thread to the GUI status bar."""
+
+    message = getattr(QtCore, 'Signal')(str)
+
+    def __init__(self, viewer) -> None:
+        super().__init__()
+        self._viewer = viewer
+        self.message.connect(self._show)
+
+    def _show(self, text: str) -> None:
+        set_status(self._viewer, text, timeout_ms=0)
+
+
+def _run_rust_cli(command, env, on_progress=None):
+    """Run the Rust CLI, forwarding SCAN_PROGRESS lines to ``on_progress(pct, label)``."""
+    process = subprocess.Popen(
+        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    stdout_parts: list[str] = []
+    reader = threading.Thread(target=lambda: stdout_parts.append(process.stdout.read()), daemon=True)
+    reader.start()
+    stderr_lines: list[str] = []
+    for line in process.stderr:
+        if line.startswith('SCAN_PROGRESS '):
+            if on_progress is not None:
+                parts = line.split(None, 2)
+                try:
+                    on_progress(float(parts[1]), parts[2].strip() if len(parts) > 2 else '')
+                except (ValueError, IndexError):
+                    pass
+            continue
+        stderr_lines.append(line)
+    process.wait()
+    reader.join()
+    return subprocess.CompletedProcess(
+        command, process.returncode, ''.join(stdout_parts), ''.join(stderr_lines),
+    )
+
+
 def _rust_f64_cli() -> Path | None:
     candidates = []
     if os.environ.get('SPEKTRAFILM_F64_CLI'):
         candidates.append(Path(os.environ['SPEKTRAFILM_F64_CLI']))
     candidates.extend([
         Path('spektrafilm-f64.exe'),
+        Path(__file__).resolve().parents[2] / 'bin' / 'spektrafilm-f64.exe',
+        Path(__file__).resolve().parents[2] / 'bin' / 'spektrafilm-f64',
         Path(__file__).resolve().parents[3] / 'spektrafilm-rs' / 'target' / 'release' / 'spektrafilm-f64.exe',
         Path(__file__).resolve().parents[3] / 'spektrafilm-rs' / 'target' / 'release' / 'spektrafilm-f64',
     ])
     return next((p for p in candidates if p.is_file()), None)
+
+
+def _rust_f64_data_dir(cli: Path) -> Path:
+    if os.environ.get('SPEKTRAFILM_DATA_DIR'):
+        return Path(os.environ['SPEKTRAFILM_DATA_DIR'])
+    # Published layout keeps `data` next to the executable; the Rust repo
+    # layout is target/release/<exe> with `data` at the repo root.
+    for candidate in (cli.parent / 'data', cli.parents[2] / 'data'):
+        if (candidate / 'profiles').is_dir():
+            return candidate
+    return cli.parent / 'data'
 
 
 def _jsonable(value):
@@ -203,6 +261,7 @@ class GuiController:
         # on its own channel; within a channel the runner coalesces so a burst
         # of requests never piles up and only the latest result lands.
         self._jobs = BackgroundRunner(self._thread_pool, on_busy_changed=self._set_busy)
+        self._rust_progress = _RustProgressRelay(self._viewer)
         # Preview and Scan run on separate channels (a manual Scan is never
         # superseded by a preview), but they share one cached simulator, so the
         # runtime work itself is serialized with this lock.
@@ -367,14 +426,17 @@ class GuiController:
                 'scan',
                 # Honor the output color space selected in the UI.  Do not
                 # silently replace ProPhoto RGB with sRGB for Rust scans.
-                lambda: self._rust_scan_job(state),
+                lambda: self._rust_scan_job(
+                    state,
+                    diagnostics=state.special.scan_diagnostics,
+                ),
                 on_done=lambda result: self._on_rust_scan_finished(result, state),
                 on_error=lambda message: self._on_simulation_failed(message, mode_label='Rust scan'),
             )
             return
         self._start_simulation(source_layer_name=INPUT_LAYER_NAME, mode_label='Scan', channel='scan')
 
-    def _rust_scan_job(self, state, *, render_output_color_space=None):
+    def _rust_scan_job(self, state, *, render_output_color_space=None, diagnostics=False):
         if self._current_input_path is None:
             raise RuntimeError('Rust scan requires the original input image path.')
         cli = _rust_f64_cli()
@@ -387,7 +449,7 @@ class GuiController:
         input_path = Path(tempfile.mktemp(suffix='.tiff'))
         params_path = None
         try:
-            params = build_params_from_state(state)
+            params = prepare_rust_scan_params(build_params_from_state(state))
             save_image_oiio(str(input_path), np.asarray(source_image)[..., :3],
                             color_space=state.input_image.io.input_color_space,
                             cctf_encoding=False)
@@ -397,22 +459,49 @@ class GuiController:
             params.io.input_cctf_decoding = state.input_image.io.input_cctf_decoding
             if render_output_color_space is not None:
                 params.io.output_color_space = render_output_color_space
+            serialized_params = json.dumps(
+                _jsonable(params),
+                allow_nan=False,
+                sort_keys=True,
+            )
             with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False, encoding='utf-8') as handle:
-                json.dump(_jsonable(params), handle, allow_nan=False)
+                handle.write(serialized_params)
                 params_path = Path(handle.name)
             command = [str(cli), 'process', str(input_path), '-o', str(output_path),
                        '--film', state.simulation.selection.film_stock,
                        '--paper', state.simulation.selection.print_paper,
-                       '--data-dir', str(cli.parents[2] / 'data'), '--params', str(params_path)]
+                       '--data-dir', str(_rust_f64_data_dir(cli)), '--params', str(params_path)]
+            if diagnostics:
+                command.append('--diagnostics')
             env = os.environ.copy()
             # The f64 export binary must use the CPU path. If the default
             # backend is left enabled, the binary selects wgpu and silently
             # runs the f32 GPU approximation instead.
             env['SPEKTRAFILM_BACKEND'] = 'cpu'
-            result = subprocess.run(command, capture_output=True, text=True, env=env)
+            relay = self._rust_progress
+            result = _run_rust_cli(
+                command, env,
+                lambda pct, label: relay.message.emit(f'Computing Rust f64 scan... {pct:.0f}%  ({label})'),
+            )
             if result.returncode != 0:
                 raise RuntimeError((result.stderr or result.stdout).strip())
             image = np.asarray(load_image_oiio(str(output_path)))[..., :3]
+            if diagnostics:
+                engine_output = result.stderr or result.stdout
+                calibration = parse_rust_calibration(engine_output)
+                if calibration is None:
+                    raise RuntimeError(
+                        'Rust diagnostics did not return the print-calibration record.'
+                    )
+                write_scan_diagnostics(
+                    engine='rust_f64',
+                    input_image=source_image,
+                    output_image=image,
+                    serialized_params=serialized_params,
+                    engine_output=engine_output,
+                    stage_statistics=parse_rust_stage_statistics(engine_output),
+                    calibration=calibration,
+                )
             return image, params.io.output_color_space
         finally:
             output_path.unlink(missing_ok=True)
@@ -422,25 +511,24 @@ class GuiController:
 
     def _on_rust_scan_finished(self, image, state) -> None:
         image, rendered_color_space = image
-        image = apply_auto_levels(np.asarray(image), state.simulation.io.auto_levels)
-        display = colour.RGB_to_RGB(
+        # Rust already applies auto-levels inside the engine; applying it
+        # again here would double the contrast/neutral snap.
+        image = np.asarray(image)
+        use_display_transform = state.gui_only.display.use_display_transform
+        # Same display path as the Python preview/scan.
+        display, status = self._prepare_output_display_image(
             image,
-            rendered_color_space,
-            'sRGB',
-            # Rust returns output_cctf_encoding=true; decode its encoded
-            # result before converting it for display.
-            apply_cctf_decoding=True,
-            apply_cctf_encoding=True,
+            output_color_space=rendered_color_space,
+            use_display_transform=use_display_transform,
         )
-        display = np.uint8(np.clip(display, 0.0, 1.0) * 255.0)
         self._set_or_add_output_layer(
             display,
             float_image=image,
             output_color_space=rendered_color_space,
             output_cctf_encoding=True,
-            use_display_transform=False,
+            use_display_transform=use_display_transform,
         )
-        set_status(self._viewer, 'Rust f64 scan completed.')
+        set_status(self._viewer, f'Rust f64 scan completed. {status}')
 
     def _run_rust_scan(self, state) -> None:
         if self._current_input_path is None:
@@ -475,7 +563,7 @@ class GuiController:
                 command = [str(cli), 'process', str(input_path), '-o', str(output_path),
                            '--film', state.simulation.selection.film_stock,
                            '--paper', state.simulation.selection.print_paper,
-                           '--data-dir', str(cli.parents[2] / 'data'), '--params', str(params_path)]
+                           '--data-dir', str(_rust_f64_data_dir(cli)), '--params', str(params_path)]
                 set_status(self._viewer, 'Computing Rust f64 scan...', timeout_ms=0)
                 QtWidgets.QApplication.processEvents()
                 result = subprocess.run(command, capture_output=True, text=True)
@@ -488,11 +576,6 @@ class GuiController:
             # second time; that would crush the shadows and desaturate the
             # image.
             image = np.asarray(load_image_oiio(str(output_path)))[..., :3]
-            # Rust currently does not implement Python's post-scan auto-levels
-            # stage. Apply the same inexpensive operation after loading the
-            # Rust-encoded result; this is why the raw Rust image is darker
-            # than the Python reference when auto-levels are enabled.
-            image = apply_auto_levels(image, state.simulation.io.auto_levels)
             display_image, status = self._prepare_output_display_image(
                 image,
                 output_color_space=state.simulation.io.output_color_space,
@@ -653,7 +736,6 @@ class GuiController:
                 render_output_color_space='sRGB' if jpeg_output else None,
             )
             image, rendered_color_space = rendered
-            image = apply_auto_levels(image, gui_state.simulation.io.auto_levels)
             saving_color_space = gui_state.simulation.workflow.saving_color_space
             saving_cctf_encoding = gui_state.simulation.workflow.saving_cctf_encoding
             # JPEG is an interchange/display format. Always write it as
@@ -896,7 +978,14 @@ class GuiController:
             pil_image_module=PILImage,
         )
 
-    def _process_image_with_runtime(self, image_data: np.ndarray, params) -> np.ndarray:
+    def _process_image_with_runtime(
+        self,
+        image_data: np.ndarray,
+        params,
+        *,
+        on_tap=None,
+        on_diagnostic=None,
+    ) -> np.ndarray:
         apply_stocks_specifics = (
             self._runtime_simulator is None
             or self._next_runtime_digest_applies_stock_specifics
@@ -911,7 +1000,13 @@ class GuiController:
             else:
                 self._runtime_simulator.update_params(digested_params)
             self._next_runtime_digest_applies_stock_specifics = False
-            return self._runtime_simulator.process(image_data)
+            if on_tap is None and on_diagnostic is None:
+                return self._runtime_simulator.process(image_data)
+            return self._runtime_simulator.process(
+                image_data,
+                on_tap=on_tap,
+                on_diagnostic=on_diagnostic,
+            )
         except Exception:
             self._runtime_simulator = None
             raise
@@ -946,12 +1041,61 @@ class GuiController:
         # Preview and Scan run on independent channels and can therefore be in
         # flight on two worker threads at once; the lock serializes their use of
         # the single shared runtime simulator (and the display path).
+        stage_statistics: dict[str, dict[str, object]] = {}
+        tap_names = {
+            'rgb_pre': 'input_rescaled',
+            'log_e_film': 'filming_log_exposure',
+            'cmy_film': 'filming_density',
+            'log_e_print': 'printing_log_exposure',
+            'cmy_print': 'printing_density',
+            'rgb_out': 'scan_output_encoded',
+        }
+
+        def run_simulation(image, params):
+            if not request.scan_diagnostics:
+                return self._process_image_with_runtime(image, params)
+
+            def capture_tap(tap, value):
+                stage_name = tap_names.get(tap)
+                if stage_name is not None:
+                    stage_statistics[stage_name] = image_statistics(value)
+
+            def capture_print_stage(stage_name, value):
+                stage_statistics[stage_name] = image_statistics(value)
+
+            return self._process_image_with_runtime(
+                image,
+                params,
+                on_tap=capture_tap,
+                on_diagnostic=capture_print_stage,
+            )
+
         with self._runtime_lock:
-            return runtime.execute_simulation_request(
+            result = runtime.execute_simulation_request(
                 request,
-                run_simulation_fn=self._process_image_with_runtime,
+                run_simulation_fn=run_simulation,
                 prepare_output_display_image_fn=self._prepare_output_display_image,
             )
+            calibration = (
+                self._runtime_simulator.scan_diagnostics()
+                if request.scan_diagnostics and self._runtime_simulator is not None
+                else None
+            )
+        if request.scan_diagnostics:
+            serialized_params = json.dumps(
+                _jsonable(request.params),
+                allow_nan=False,
+                sort_keys=True,
+            )
+            write_scan_diagnostics(
+                engine='python',
+                input_image=request.image,
+                output_image=result.float_image,
+                serialized_params=serialized_params,
+                stage_statistics=stage_statistics,
+                calibration=calibration,
+            )
+        return result
 
     @staticmethod
     def _configure_simulation_params(params, *, source_layer_name: str):
@@ -987,6 +1131,7 @@ class GuiController:
             params=params,
             output_color_space=state.simulation.io.output_color_space,
             use_display_transform=state.gui_only.display.use_display_transform,
+            scan_diagnostics=bool(state.special.scan_diagnostics and channel == 'scan'),
         )
 
         # Button state is driven centrally by the runner's busy listener

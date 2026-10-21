@@ -59,6 +59,18 @@ class TestRunTopology:
         result = run_topology(self._linear_chain(), inject="a", collect="d", image=10)
         assert result == ((10 + 1) * 2) - 3
 
+    def test_tap_observer_receives_injected_and_written_values(self):
+        taps = []
+        result = run_topology(
+            self._linear_chain(),
+            inject="a",
+            collect="c",
+            image=10,
+            on_tap=lambda tap, value: taps.append((tap, value)),
+        )
+        assert result == (10 + 1) * 2
+        assert taps == [("a", 10), ("b", 11), ("c", 22)]
+
     def test_intermediate_collect_stops_early(self):
         fired = []
         result = run_topology(

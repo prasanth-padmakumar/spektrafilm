@@ -4,6 +4,7 @@ from dataclasses import replace
 
 from spektrafilm_gui.state import GuiState
 from spektrafilm.runtime.api import init_params
+from spektrafilm.runtime.params_builder import apply_database_neutral_print_filters
 from spektrafilm.runtime.params_schema import RuntimePhotoParams
 
 
@@ -26,6 +27,15 @@ def build_params_from_state(state: GuiState) -> RuntimePhotoParams:
     _apply_enlarger(params, state)
     _apply_scanner(params, state)
     _apply_settings(params, state)
+    return params
+
+
+def prepare_rust_scan_params(params: RuntimePhotoParams) -> RuntimePhotoParams:
+    """Resolve Python-side scan defaults before serializing params to Rust."""
+    apply_database_neutral_print_filters(params)
+    if params.debug.deactivate_stochastic_effects:
+        params.film_render.grain.active = False
+        params.print_render.glare.active = False
     return params
 
 

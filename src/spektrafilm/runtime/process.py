@@ -19,9 +19,19 @@ class Simulator:
     def __init__(self, params: RuntimePhotoParams):
         self._pipeline = SimulationPipeline(params) # should stay private
 
-    def process(self, image):
+    def process(self, image, *, on_tap=None, on_diagnostic=None):
         """Process the input image through the simulation pipeline and return the final result."""
-        return self._pipeline.process(image)
+        if on_tap is None and on_diagnostic is None:
+            return self._pipeline.process(image)
+        if on_diagnostic is None:
+            return self._pipeline.process(image, on_tap=on_tap)
+        if on_tap is None:
+            return self._pipeline.process(image, on_diagnostic=on_diagnostic)
+        return self._pipeline.process(
+            image,
+            on_tap=on_tap,
+            on_diagnostic=on_diagnostic,
+        )
 
     def update_params(self, params):
         """Update the parameters of the simulation pipeline."""
@@ -36,6 +46,10 @@ class Simulator:
     def get_timings(self):
         """Get the timings of the different stages of the simulation pipeline."""
         return self._pipeline.get_timings()
+
+    def scan_diagnostics(self):
+        """Return compact calibration vectors for a diagnostics-enabled scan."""
+        return self._pipeline.scan_diagnostics()
 
     def get_total_elapsed_time(self):
         """Get the total wall-clock time of the last process call."""

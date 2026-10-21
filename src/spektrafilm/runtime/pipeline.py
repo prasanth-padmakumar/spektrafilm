@@ -135,8 +135,17 @@ class SimulationPipeline:
         self._lut_service.timings = self.timings
 
         self._topology: list[Node] = self._build_topology()
+        self._diagnostic_callback = None
 
-    def process(self, image, *, inject: str | None = None, collect: str | None = None):
+    def process(
+        self,
+        image,
+        *,
+        inject: str | None = None,
+        collect: str | None = None,
+        on_tap=None,
+        on_diagnostic=None,
+    ):
         """Run the pipeline.
 
         Defaults run end-to-end (``rgb_in`` → ``rgb_out``). Pass
@@ -149,6 +158,8 @@ class SimulationPipeline:
 
         self.timings.clear()
         start = perf_counter()
+        previous_diagnostic_callback = self._diagnostic_callback
+        self._diagnostic_callback = on_diagnostic
         try:
             return run_topology(
                 self._topology,
@@ -156,12 +167,155 @@ class SimulationPipeline:
                 collect,
                 image,
                 on_fire=self._record_node_timing,
+                on_tap=on_tap,
             )
         finally:
+            self._diagnostic_callback = previous_diagnostic_callback
             self._last_elapsed_time = perf_counter() - start
 
     def get_timings(self):
         return self.timings
+
+    def scan_diagnostics(self):
+        from spektrafilm.config import SPECTRAL_SHAPE
+        from spektrafilm.model.illuminants import standard_illuminant
+        from spektrafilm.runtime.stages.printing import _exposure_factor
+        from spektrafilm.utils.autoexposure import measure_raw_autoexposure_ev
+        from spektrafilm.utils.conversions import density_to_light
+
+        film_stage = self._filming_stage
+        printing_stage = self._printing_stage
+        gray_rgb = np.full((1, 1, 3), 0.184, dtype=np.float64)
+        raw_unscaled = film_stage._rgb_to_film_raw(gray_rgb)
+        auto_ev = (
+            float(measure_raw_autoexposure_ev(raw_unscaled, self.camera.auto_exposure_method))
+            if self.camera.auto_exposure
+            else 0.0
+        )
+        auto_scale = 2.0**auto_ev if self.camera.auto_exposure else 1.0
+        raw_scaled = raw_unscaled * auto_scale
+        comp_scale = 2.0**self.camera.exposure_compensation_ev
+        raw_comp_unscaled = film_stage._rgb_to_film_raw(gray_rgb * comp_scale)
+        raw_comp_scaled = raw_comp_unscaled * auto_scale
+        density_unscaled = film_stage._raw_to_density_spectral(raw_unscaled)
+        density_comp_unscaled = film_stage._raw_to_density_spectral(raw_comp_unscaled)
+        density_midgray = film_stage._raw_to_density_spectral(raw_scaled)
+        density_midgray_comp = film_stage._raw_to_density_spectral(raw_comp_scaled)
+
+        sensitivity = np.nan_to_num(10.0 ** self.print.data.log_sensitivity)
+        source_illuminant = standard_illuminant(self.enlarger.illuminant)
+        print_illuminant = self._enlarger_service.enlarger_filtered_illuminant(source_illuminant)
+        factor_midgray = float(_exposure_factor(sensitivity, print_illuminant, density_midgray).item())
+        factor_midgray_comp = float(
+            _exposure_factor(sensitivity, print_illuminant, density_midgray_comp).item()
+        )
+        factor_midgray_unscaled = float(
+            _exposure_factor(sensitivity, print_illuminant, density_unscaled).item()
+        )
+        factor_midgray_comp_unscaled = float(
+            _exposure_factor(sensitivity, print_illuminant, density_comp_unscaled).item()
+        )
+        if self.enlarger.normalize_print_exposure and self.enlarger.print_exposure_compensation:
+            selected_factor = factor_midgray_comp
+        elif self.enlarger.normalize_print_exposure:
+            selected_factor = factor_midgray
+        elif self.enlarger.print_exposure_compensation:
+            selected_factor = factor_midgray_comp / factor_midgray
+        else:
+            selected_factor = 1.0
+
+        preflash = printing_stage._compute_raw_preflash(source_illuminant, sensitivity)
+        bw_correction = float(
+            self._color_reference_service.black_white_printing_exposure_correction()
+        )
+        raw_midgray_by_channel = np.einsum(
+            "w,wc->c",
+            density_to_light(density_midgray, print_illuminant).reshape(-1),
+            sensitivity,
+        )
+        raw_comp_midgray_by_channel = np.einsum(
+            "w,wc->c",
+            density_to_light(density_midgray_comp, print_illuminant).reshape(-1),
+            sensitivity,
+        )
+        def as_list(value):
+            def clean(item):
+                if isinstance(item, list):
+                    return [clean(child) for child in item]
+                numeric = float(item)
+                return numeric if np.isfinite(numeric) else None
+
+            return clean(np.asarray(value).tolist())
+
+        return {
+            "midgray": {
+                "rgb": [0.184, 0.184, 0.184],
+                "raw_before_autoexposure": as_list(raw_unscaled.reshape(-1, 3)[0]),
+                "auto_exposure_method": self.camera.auto_exposure_method,
+                "auto_exposure_ev": auto_ev,
+                "auto_exposure_scale": auto_scale,
+                "raw_after_autoexposure": as_list(raw_scaled.reshape(-1, 3)[0]),
+                "density_spectral_before_autoexposure": as_list(
+                    np.asarray(density_unscaled).reshape(-1)
+                ),
+                "exposure_compensation_ev": float(self.camera.exposure_compensation_ev),
+                "compensated_raw_before_autoexposure": as_list(raw_comp_unscaled.reshape(-1, 3)[0]),
+                "compensated_raw_after_autoexposure": as_list(raw_comp_scaled.reshape(-1, 3)[0]),
+                "density_spectral": as_list(np.asarray(density_midgray).reshape(-1)),
+                "compensated_density_spectral": as_list(
+                    np.asarray(density_midgray_comp).reshape(-1)
+                ),
+            },
+            "print_calibration": {
+                "illuminant_name": self.enlarger.illuminant,
+                "wavelengths_nm": as_list(SPECTRAL_SHAPE.wavelengths),
+                "filter_values": {
+                    "c": float(self.enlarger.c_filter_neutral),
+                    "m": float(self.enlarger.m_filter_neutral),
+                    "y": float(self.enlarger.y_filter_neutral),
+                    "m_shift": float(self.enlarger.m_filter_shift),
+                    "y_shift": float(self.enlarger.y_filter_shift),
+                },
+                "source_illuminant": as_list(source_illuminant),
+                "filtered_illuminant": as_list(print_illuminant),
+                "print_sensitivity": as_list(sensitivity),
+                "film_channel_density": as_list(self.film.data.channel_density),
+                "film_base_density": as_list(self.film.data.base_density),
+                "raw_midgray_by_channel": as_list(raw_midgray_by_channel),
+                "raw_compensated_midgray_by_channel": as_list(raw_comp_midgray_by_channel),
+                "factor_midgray": factor_midgray,
+                "factor_midgray_comp": factor_midgray_comp,
+                "factor_midgray_after_autoexposure": factor_midgray,
+                "factor_midgray_comp_after_autoexposure": factor_midgray_comp,
+                "factor_midgray_before_autoexposure": factor_midgray_unscaled,
+                "factor_midgray_comp_before_autoexposure": factor_midgray_comp_unscaled,
+                "selected_exposure_factor": float(selected_factor),
+                "normalize_print_exposure": bool(self.enlarger.normalize_print_exposure),
+                "print_exposure_compensation": bool(self.enlarger.print_exposure_compensation),
+                "print_exposure": float(self.enlarger.print_exposure),
+                "black_white_correction": bw_correction,
+                "effective_print_multiplier": float(
+                    selected_factor * self.enlarger.print_exposure * bw_correction
+                ),
+                "preflash_raw": as_list(preflash),
+                "preflash_exposure": float(self.enlarger.preflash_exposure),
+                "use_enlarger_lut": bool(self.settings.use_enlarger_lut),
+                "lut_resolution": int(self.settings.lut_resolution),
+                "diffusion_filter_active": bool(self.enlarger.diffusion_filter.active),
+                "wavelength_count": int(len(print_illuminant)),
+                "non_finite_counts": {
+                    "source_illuminant": int(np.count_nonzero(~np.isfinite(source_illuminant))),
+                    "filtered_illuminant": int(np.count_nonzero(~np.isfinite(print_illuminant))),
+                    "print_sensitivity": int(np.count_nonzero(~np.isfinite(sensitivity))),
+                    "film_channel_density": int(
+                        np.count_nonzero(~np.isfinite(self.film.data.channel_density))
+                    ),
+                    "film_base_density": int(
+                        np.count_nonzero(~np.isfinite(self.film.data.base_density))
+                    ),
+                },
+            },
+        }
 
     def get_total_elapsed_time(self):
         return self._last_elapsed_time
@@ -224,10 +378,16 @@ class SimulationPipeline:
                 Node((Tap.CMY_FILM,), (Tap.RGB_OUT,), s.scan, "scanning.scan_film"),
             ]
         return common + [
-            Node((Tap.CMY_FILM,),    (Tap.LOG_E_PRINT,), p.expose,  "printing.expose"),
+            Node((Tap.CMY_FILM,),    (Tap.LOG_E_PRINT,), self._expose_print, "printing.expose"),
             Node((Tap.LOG_E_PRINT,), (Tap.CMY_PRINT,),   p.develop, "printing.develop"),
             Node((Tap.CMY_PRINT,),   (Tap.RGB_OUT,),     s.scan,    "scanning.scan_print"),
         ]
+
+    def _expose_print(self, cmy_film_density):
+        return self._printing_stage.expose(
+            cmy_film_density,
+            on_diagnostic=self._diagnostic_callback,
+        )
 
     def _preprocess(self, image):
         image = np.double(np.array(image)[:, :, 0:3])

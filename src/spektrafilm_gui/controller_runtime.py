@@ -17,6 +17,7 @@ class SimulationRequest:
     params: object
     output_color_space: str
     use_display_transform: bool
+    scan_diagnostics: bool = False
 
 
 @dataclass(slots=True)

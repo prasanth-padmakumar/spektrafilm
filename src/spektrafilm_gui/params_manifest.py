@@ -934,6 +934,14 @@ SPECIAL_PANEL_FIELDS = (
         label="Deterministic parity mode",
         tooltip="Disable stochastic effects for pixel-for-pixel Python/Rust comparisons.",
     ),
+    ParamSpec(
+        "scan_diagnostics",
+        label="Scan diagnostics",
+        tooltip=(
+            "Write Python/Rust scan logs with input/output statistics, hashes, "
+            "and render parameters to the workspace. Does not change the render."
+        ),
+    ),
 )
 
 SPECIAL_FIELDS = SPECIAL_PANEL_FIELDS

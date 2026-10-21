@@ -37,7 +37,7 @@ class PrintingStage:
 
     # public methods
 
-    def expose(self, cmy_film_density: np.ndarray) -> np.ndarray:
+    def expose(self, cmy_film_density: np.ndarray, *, on_diagnostic=None) -> np.ndarray:
         density_min = match_channels(self._film_render.grain.density_min, self._film.info.n_channels)
         cmy_film_black = np.zeros((1, 1, self._film.info.n_channels)) - density_min[None, None, :]
         cmy_film_white = np.nanmax(self._film.data.density_curves, axis=0)[None, None, :]
@@ -52,14 +52,25 @@ class PrintingStage:
             use_lut=self._settings.use_enlarger_lut,
         )    
         raw = 10**log_raw_print
+        if on_diagnostic is not None:
+            on_diagnostic("printing_raw_after_midgray_preflash", raw)
         raw *= self._enlarger.print_exposure
+        if on_diagnostic is not None:
+            on_diagnostic("printing_raw_after_print_exposure", raw)
         raw *= self._color_reference_service.black_white_printing_exposure_correction()
+        if on_diagnostic is not None:
+            on_diagnostic("printing_raw_after_black_white_correction", raw)
         raw = apply_diffusion_filter_um(
             raw,
             self._enlarger.diffusion_filter,
             pixel_size_um=self._resize_service.pixel_size_um,
         )
-        return np.log10(np.fmax(raw, 0.0) + 1e-10)
+        if on_diagnostic is not None:
+            on_diagnostic("printing_raw_after_diffusion", raw)
+        result = np.log10(np.fmax(raw, 0.0) + 1e-10)
+        if on_diagnostic is not None:
+            on_diagnostic("printing_log_exposure", result)
+        return result
 
     def develop(self, log_raw: np.ndarray) -> np.ndarray:
         model = self._print.data.density_curves_model

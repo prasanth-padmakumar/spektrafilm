@@ -26,6 +26,7 @@ def test_gui_state_round_trip_preserves_tuple_fields() -> None:
     state.simulation.io.auto_levels = 'Per Channel Contrast with Snap Neutral Midtones'
     state.gui_only.display.gray_18_canvas = True
     state.gui_only.display.white_padding = 0.18
+    state.special.scan_diagnostics = True
 
     restored = gui_state_from_dict(gui_state_to_dict(state))
 
@@ -33,6 +34,13 @@ def test_gui_state_round_trip_preserves_tuple_fields() -> None:
     assert isinstance(restored.input_image.io.crop_size, tuple)
     assert isinstance(restored.grain.rms_granularity, tuple)
     assert restored.simulation.io.auto_levels == 'Per Channel Contrast with Snap Neutral Midtones'
+    assert restored.special.scan_diagnostics is True
+
+
+def test_legacy_special_state_defaults_scan_diagnostics_off() -> None:
+    restored = gui_state_from_dict({'special': {'film_channel_swap': [0, 1, 2]}})
+
+    assert restored.special.scan_diagnostics is False
 
 
 def test_save_and_load_gui_state_file(tmp_path: Path) -> None:

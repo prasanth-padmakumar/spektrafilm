@@ -383,7 +383,7 @@ def test_numeric_field_specs_define_minimum_and_step() -> None:
 
     special_specs = {spec.leaf: spec for spec in SPECIAL_FIELDS}
     for field_name in tuple(spec.leaf for spec in SPECIAL_FIELDS):
-        annotation = tuple[int, int, int]
+        annotation = get_type_hints(state_module.SpecialState)[field_name]
         is_numeric = annotation in (int, float) or get_origin(annotation) is tuple
         if not is_numeric:
             continue

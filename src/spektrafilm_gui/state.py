@@ -54,6 +54,7 @@ class SpecialState:
     film_channel_swap: tuple[int, int, int]
     print_channel_swap: tuple[int, int, int]
     deterministic_parity: bool = False
+    scan_diagnostics: bool = False
 
 
 @dataclass(slots=True)
@@ -137,6 +138,8 @@ def normalize_special_dict(data: dict[str, Any]) -> dict[str, Any]:
     return {
         'film_channel_swap': data.get('film_channel_swap', (0, 1, 2)),
         'print_channel_swap': data.get('print_channel_swap', (0, 1, 2)),
+        'deterministic_parity': data.get('deterministic_parity', False),
+        'scan_diagnostics': data.get('scan_diagnostics', False),
     }
 
 
@@ -331,6 +334,7 @@ def gui_state_from_params(
             film_channel_swap=(0, 1, 2),
             print_channel_swap=(0, 1, 2),
             deterministic_parity=False,
+            scan_diagnostics=False,
         ),
         simulation=SimulationState(
             selection=SelectionState(
